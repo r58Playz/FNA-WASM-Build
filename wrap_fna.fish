@@ -17,12 +17,18 @@ for func in $FUNCS
 	for arg in $(string split ',' $args)
 		echo \t$(string trim $arg)\;
 	end
-	echo \t$ret \*WRAP_RET\;
+	if ! test "$ret" = "void"
+		echo \t$ret \*WRAP_RET\;
+	end
 	echo \} WRAP__struct_$name\;
 
 	echo void WRAP__MAIN__$name\(void \*wrap_struct_ptr\) \{
 	echo \tWRAP__struct_$name \*wrap_struct \= \(WRAP__struct_$name\*\)wrap_struct_ptr\;
-	echo \t\*\(wrap_struct\-\>WRAP_RET\) \= $name\(
+	if ! test "$ret" = "void"
+		echo \t\*\(wrap_struct\-\>WRAP_RET\) \= $name\(
+	else
+		echo \t$name\(
+	end
 	set i 0
 	for arg in $(string split ',' $argsargs)
 		set argtrimmed $(string trim $arg)
@@ -47,19 +53,25 @@ for func in $FUNCS
 	echo \t\/\/ \$argc: `$argc`
 	echo \t\/\/
 	echo \t\/\/ return $name\($argsargs\)\;
-	echo \t$ret wrap_ret \= 0\;
+	if ! test "$ret" = "void"
+		echo \t$ret wrap_ret\;
+	end
 	echo \tWRAP__struct_$name wrap_struct \= \{
 	for arg in $(string split ',' $argsargs)
 		set argtrimmed $(string trim $arg)
 		echo \t\t.$argtrimmed \= $argtrimmed\,
 	end
-	echo \t\t.WRAP_RET \= \&wrap_ret
+	if ! test "$ret" = "void"
+		echo \t\t.WRAP_RET \= \&wrap_ret
+	end
 	echo \t\}\;
 	echo \tif \(\!emscripten_proxy_sync\(emscripten_proxy_get_system_queue\(\), emscripten_main_runtime_thread_id\(\), WRAP__MAIN__$name, \(void\*\)\&wrap_struct\)\) \{
 	echo \t\temscripten_run_script\(\"console.error\(\'wrap.fish: failed to proxy $name\'\)\"\)\;
 	echo \t\tassert\(0\)\;
 	echo \t\}
-	echo \treturn wrap_ret\;
+	if ! test "$ret" = "void"
+		echo \treturn wrap_ret\;
+	end
 	echo \}
 	echo
 end
