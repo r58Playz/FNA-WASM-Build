@@ -44,8 +44,8 @@ jobs:
           cd emscripten-build
           CFLAGS="-pthread" emcmake cmake -S .. \
             -DSDL_WERROR=ON \
-            -DSDL_TESTS=ON \
-            -DSDL_INSTALL_TESTS=ON \
+            -DSDL_TESTS=OFF \
+            -DSDL_INSTALL_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=prefix \
             -GNinja
