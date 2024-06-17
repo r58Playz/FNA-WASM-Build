@@ -82,7 +82,8 @@ jobs:
         shell: bash
         run: |
           emcc -r wrap_fna.c -o wrap_fna.o
-          mkdir FNA3D
+          mkdir FNA3DWrap
+          cd FNA3DWrap
           ar x ../Binaries/FNA3D.a
           mv ../wrap_fna.o .
           emar rc ../Binaries/FNA3D_Wrapped.a *.o
