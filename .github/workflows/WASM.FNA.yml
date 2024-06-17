@@ -81,7 +81,6 @@ jobs:
       - name: Wrap FNA3D
         shell: bash
         run: |
-          git clone https://github.com/FNA-XNA/FNA
           emcc -r wrap_fna.c -o wrap_fna.o
           mkdir FNA3D
           ar x ../Binaries/FNA3D.a

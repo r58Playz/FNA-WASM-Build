@@ -1,6 +1,6 @@
 set FUNCS "void FNA3D_SwapBuffers(FNA3D_Device *device, FNA3D_Rect *sourceRectangle, FNA3D_Rect *destinationRectangle, void *overrideWindowHandle)"
 
-echo "#include \"FNA/lib/FNA3D/include/FNA3D.h\""
+echo "#include \"FNA3D/include/FNA3D.h\""
 echo "#include <emscripten/proxying.h>"
 echo "#include <emscripten/threading.h>"
 echo "#include <assert.h>"
