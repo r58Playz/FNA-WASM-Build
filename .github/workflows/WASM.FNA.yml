@@ -37,7 +37,7 @@ jobs:
       - name: SDL2    
         shell: bash
         run: |
-          git clone -b SDL2 https://github.com/libsdl-org/SDL
+          git clone https://github.com/libsdl-org/SDL
           cd SDL
           mkdir emscripten-build
           cd emscripten-build
@@ -49,15 +49,15 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=prefix \
             -GNinja
           ninja --verbose
-      - name: FNA3D 24.09
+      - name: FNA3D
         shell: bash
         run: |
-          git clone -b 24.09 --recursive https://github.com/FNA-XNA/FNA3D
+          git clone --recursive https://github.com/FNA-XNA/FNA3D
           cd FNA3D
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
           mkdir build
           cd build
-          emcmake cmake .. -DSDL2_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include -DSDL2_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL2.a
+          emcmake cmake .. -DBUILD_SDL3 -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL2.a
           emmake make
       - name: FAudio
         shell: bash
