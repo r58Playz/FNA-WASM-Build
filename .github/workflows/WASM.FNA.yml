@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           mkdir Binaries
-          cp ./SDL/emscripten-build/libSDL2.a Binaries/SDL2.a
+          cp ./SDL/emscripten-build/libSDL3.a Binaries/SDL3.a
           cp ./FNA3D/build/libFNA3D.a Binaries/FNA3D.a
           cp ./FNA3D/build/libmojoshader.a Binaries/libmojoshader.a    
           cp ./FAudio/build/libFAudio.a Binaries/FAudio.a
