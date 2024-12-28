@@ -1,8 +1,16 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ccf645f..fbeb881 100644
+index 935f623..b878fef 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -130,7 +130,8 @@ endif()
+@@ -124,7 +124,6 @@ add_library(mojoshader STATIC
+ 	MojoShader/mojoshader_common.c
+ 	MojoShader/mojoshader_d3d11.c
+ 	MojoShader/mojoshader_opengl.c
+-	MojoShader/mojoshader_sdlgpu.c
+ 	MojoShader/profiles/mojoshader_profile_common.c
+ 	MojoShader/profiles/mojoshader_profile_glsl.c
+ 	MojoShader/profiles/mojoshader_profile_hlsl.c
+@@ -141,7 +140,8 @@ endif()
  
  # Build flags
  if(NOT MSVC)
