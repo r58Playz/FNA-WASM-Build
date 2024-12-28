@@ -24,10 +24,10 @@ jobs:
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: 3.1.56
-      - name: Install ninja
+      - name: Install dependencies
         run: |
           sudo apt-get -y update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build spirv-headers
       - name: Verify
         run: emcc -v    
       - name: Check working directory
