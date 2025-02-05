@@ -52,7 +52,7 @@ jobs:
       - name: FNA3D
         shell: bash
         run: |
-          git clone --recursive https://github.com/FNA-XNA/FNA3D
+          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.02
           cd FNA3D
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
           mkdir build
@@ -62,7 +62,7 @@ jobs:
       - name: FAudio
         shell: bash
         run: |           
-          git clone https://github.com/FNA-XNA/FAudio
+          git clone https://github.com/FNA-XNA/FAudio -b 25.02
           cd FAudio
           mkdir build
           cd build

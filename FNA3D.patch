@@ -1,16 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 935f623..52636ff 100644
+index c2747d9..c4a1e08 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -113,7 +113,6 @@ add_library(FNA3D
- 	src/FNA3D.c
- 	src/FNA3D_Driver_D3D11.c
- 	src/FNA3D_Driver_OpenGL.c
--	src/FNA3D_Driver_SDL.c
- 	src/FNA3D_Image.c
- 	src/FNA3D_PipelineCache.c
- 	src/FNA3D_Tracing.c
-@@ -124,7 +123,6 @@ add_library(mojoshader STATIC
+@@ -51,9 +51,6 @@ endif()
+ add_definitions(
+ 	-DFNA3D_DRIVER_OPENGL
+ )
+-if(BUILD_SDL3)
+-	add_definitions(-DFNA3D_DRIVER_SDL)
+-endif()
+ add_definitions(
+ 	-DMOJOSHADER_NO_VERSION_INCLUDE
+ 	-DMOJOSHADER_USE_SDL_STDLIB
+@@ -124,7 +121,6 @@ add_library(mojoshader STATIC
  	MojoShader/mojoshader_common.c
  	MojoShader/mojoshader_d3d11.c
  	MojoShader/mojoshader_opengl.c
@@ -18,7 +20,7 @@ index 935f623..52636ff 100644
  	MojoShader/profiles/mojoshader_profile_common.c
  	MojoShader/profiles/mojoshader_profile_glsl.c
  	MojoShader/profiles/mojoshader_profile_hlsl.c
-@@ -141,7 +139,8 @@ endif()
+@@ -148,7 +144,8 @@ endif()
  
  # Build flags
  if(NOT MSVC)
