@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index c2747d9..ed64ce9 100644
+index c2747d9..3417f79 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -51,9 +51,6 @@ endif()
@@ -28,7 +28,17 @@ index c2747d9..ed64ce9 100644
  	MojoShader/profiles/mojoshader_profile_common.c
  	MojoShader/profiles/mojoshader_profile_glsl.c
  	MojoShader/profiles/mojoshader_profile_hlsl.c
-@@ -148,7 +143,8 @@ endif()
+@@ -138,17 +133,11 @@ if(TRACING_SUPPORT)
+ 		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/MojoShader>
+ 	)
+ endif()
+-if(BUILD_SDL3)
+-	add_executable(fna3d_dumpspirv dumpspirv/dumpspirv.c)
+-	target_link_libraries(fna3d_dumpspirv FNA3D)
+-	target_include_directories(fna3d_dumpspirv PUBLIC
+-		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/MojoShader>
+-	)
+-endif()
  
  # Build flags
  if(NOT MSVC)
