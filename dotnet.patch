@@ -51,18 +51,9 @@ index b2f13d72d..c5cc67398 100644
  	if (klass->image == mono_defaults.corlib)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
-index c74c5c12e..7d3ed6495 100644
+index c74c5c12e..b133a578a 100644
 --- a/src/mono/mono/metadata/class.c
 +++ b/src/mono/mono/metadata/class.c
-@@ -2576,7 +2576,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
- 			if (strcmp (name, mono_field_get_name (field)) != 0)
- 				continue;
- 
--			if (type) {
-+			if (false) {
- 				MonoClassField *gfield = mono_metadata_get_corresponding_field_from_generic_type_definition (field);
- 				g_assert (gfield != NULL);
- 				MonoType *field_type = gfield->type;
 @@ -6480,6 +6480,7 @@ can_access_member (MonoClass *access_klass, MonoClass *member_klass, MonoClass*
  gboolean
  mono_method_can_access_field (MonoMethod *method, MonoClassField *field)
@@ -179,6 +170,21 @@ index e326e7a7b..f0fb2a54e 100644
  		return res;
  	}
  }
+diff --git a/src/mono/mono/metadata/metadata.c b/src/mono/mono/metadata/metadata.c
+index 8a96c1ead..23134a962 100644
+--- a/src/mono/mono/metadata/metadata.c
++++ b/src/mono/mono/metadata/metadata.c
+@@ -5733,6 +5733,10 @@ mono_metadata_class_equal (MonoClass *c1, MonoClass *c2, gboolean signature_only
+ 		return _mono_metadata_generic_class_container_equal (mono_class_get_generic_class (c1), c2, signature_only);
+ 	if (mono_class_is_gtd (c1) && mono_class_is_ginst (c2))
+ 		return _mono_metadata_generic_class_container_equal (mono_class_get_generic_class (c2), c1, signature_only);
++	if (signature_only && strcmp(m_class_get_name(c1), m_class_get_name(c2)) == 0 && strcmp(mono_class_get_image(c1)->assembly_name, mono_class_get_image(c2)->assembly_name) == 0) {
++		printf("MONO FALLBACK CHECK FOR: %s %s %s %s\n", mono_class_get_image(c1)->assembly_name, m_class_get_name(c1), mono_class_get_image(c2)->assembly_name, m_class_get_name(c2));
++		return TRUE;
++	}
+ 	MonoType *c1_type = m_class_get_byval_arg (c1);
+ 	MonoType *c2_type = m_class_get_byval_arg (c2);
+ 	if ((c1_type->type == MONO_TYPE_VAR) && (c2_type->type == MONO_TYPE_VAR))
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
 index a74e9baaf..4b86d84f7 100644
 --- a/src/mono/mono/mini/interp/transform.c
