@@ -1,18 +1,27 @@
-diff --git a/src/audio/emscripten/SDL_emscriptenaudio.c b/src/audio/emscripten/SDL_emscriptenaudio.c
-index 84ba63b..fa91e62 100644
---- a/src/audio/emscripten/SDL_emscriptenaudio.c
-+++ b/src/audio/emscripten/SDL_emscriptenaudio.c
-@@ -189,7 +189,7 @@ static bool EMSCRIPTENAUDIO_OpenDevice(SDL_AudioDevice *device)
-     }
+diff --git a/src/joystick/emscripten/SDL_sysjoystick.c b/src/joystick/emscripten/SDL_sysjoystick.c
+index cddd975a7..3d8b11cfb 100644
+--- a/src/joystick/emscripten/SDL_sysjoystick.c
++++ b/src/joystick/emscripten/SDL_sysjoystick.c
+@@ -324,7 +324,7 @@ static bool EMSCRIPTEN_JoystickOpen(SDL_Joystick *joystick, int device_index)
+     joystick->nbuttons = item->nbuttons;
+     joystick->naxes = item->naxes;
  
-     // limit to native freq
--    device->spec.freq = EM_ASM_INT({ return Module['SDL3'].audioContext.sampleRate; });
-+    device->spec.freq = MAIN_THREAD_EM_ASM_INT({ return Module['SDL3'].audioContext.sampleRate; });
-     device->sample_frames = SDL_GetDefaultSampleFramesFromFreq(device->spec.freq) * 2;  // double the buffer size, some browsers need more, and we'll just have to live with the latency.
+-    rumble_available = EM_ASM_INT({
++    rumble_available = MAIN_THREAD_EM_ASM_INT({
+         let gamepads = navigator['getGamepads']();
+         if (!gamepads) {
+             return 0;
+@@ -410,7 +410,7 @@ static bool EMSCRIPTEN_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequen
+     SDL_joylist_item *item = (SDL_joylist_item *)joystick->hwdata;
  
-     SDL_UpdatedAudioDeviceFormat(device);
+     // clang-format off
+-    bool result = EM_ASM_INT({
++    bool result = MAIN_THREAD_EM_ASM_INT({
+         let gamepads = navigator['getGamepads']();
+         if (!gamepads) {
+             return 0;
 diff --git a/src/locale/emscripten/SDL_syslocale.c b/src/locale/emscripten/SDL_syslocale.c
-index 6983628..560e6c3 100644
+index 6983628c6..560e6c346 100644
 --- a/src/locale/emscripten/SDL_syslocale.c
 +++ b/src/locale/emscripten/SDL_syslocale.c
 @@ -27,7 +27,7 @@
@@ -25,7 +34,7 @@ index 6983628..560e6c3 100644
          var buflen = $1;
          var list = undefined;
 diff --git a/src/misc/emscripten/SDL_sysurl.c b/src/misc/emscripten/SDL_sysurl.c
-index 881de01..0e6fb79 100644
+index 881de0129..0e6fb791e 100644
 --- a/src/misc/emscripten/SDL_sysurl.c
 +++ b/src/misc/emscripten/SDL_sysurl.c
 @@ -28,6 +28,6 @@ EM_JS_DEPS(sdlsysurl, "$UTF8ToString");
@@ -37,10 +46,10 @@ index 881de01..0e6fb79 100644
      return true;
  }
 diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
-index e773969..ea50ee0 100644
+index 77a81143f..36b277c4f 100644
 --- a/src/video/SDL_video.c
 +++ b/src/video/SDL_video.c
-@@ -5693,7 +5693,7 @@ bool SDL_ShowSimpleMessageBox(SDL_MessageBoxFlags flags, const char *title, cons
+@@ -5803,7 +5803,7 @@ bool SDL_ShowSimpleMessageBox(SDL_MessageBoxFlags flags, const char *title, cons
      if (!message) {
          message = "";
      }
@@ -49,16 +58,3 @@ index e773969..ea50ee0 100644
          alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1));
      },
              title, message);
-diff --git a/src/video/emscripten/SDL_emscriptenvideo.c b/src/video/emscripten/SDL_emscriptenvideo.c
-index 413d96f..e159526 100644
---- a/src/video/emscripten/SDL_emscriptenvideo.c
-+++ b/src/video/emscripten/SDL_emscriptenvideo.c
-@@ -64,7 +64,7 @@ static SDL_SystemTheme Emscripten_GetSystemTheme(void)
-     /* Technically, light theme can mean explicit light theme or no preference.
-        https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-color-scheme#syntax */
- 
--    int theme_code = EM_ASM_INT({
-+    int theme_code = MAIN_THREAD_EM_ASM_INT({
-         if (!window.matchMedia) {
-             return -1;
-         }

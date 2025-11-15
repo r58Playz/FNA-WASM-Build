@@ -1,8 +1,8 @@
 diff --git a/src/mono/browser/runtime/driver.c b/src/mono/browser/runtime/driver.c
-index 2a1d5b1db..088a0c638 100644
+index 4122d53f69c..72c82a1b9ad 100644
 --- a/src/mono/browser/runtime/driver.c
 +++ b/src/mono/browser/runtime/driver.c
-@@ -432,6 +432,7 @@ mono_wasm_profiler_init_browser (const char *desc)
+@@ -428,6 +428,7 @@ mono_wasm_profiler_init_browser_devtools (const char *desc)
  
  #ifdef ENABLE_LOG_PROFILER
  
@@ -10,7 +10,7 @@ index 2a1d5b1db..088a0c638 100644
  void mono_profiler_init_log (const char *desc);
  
  EMSCRIPTEN_KEEPALIVE void
-@@ -439,6 +440,7 @@ mono_wasm_profiler_init_log (const char *desc)
+@@ -435,6 +436,7 @@ mono_wasm_profiler_init_log (const char *desc)
  {
  	mono_profiler_init_log (desc);
  }
@@ -18,7 +18,7 @@ index 2a1d5b1db..088a0c638 100644
  
  #endif
  
-@@ -570,4 +572,4 @@ mono_wasm_read_as_bool_or_null_unsafe (PVOLATILE(MonoObject) obj) {
+@@ -584,4 +586,4 @@ mono_wasm_read_as_bool_or_null_unsafe (PVOLATILE(MonoObject) obj) {
  	end:
  	MONO_EXIT_GC_UNSAFE;
  	return result;
@@ -26,10 +26,10 @@ index 2a1d5b1db..088a0c638 100644
 \ No newline at end of file
 +}
 diff --git a/src/mono/browser/runtime/startup.ts b/src/mono/browser/runtime/startup.ts
-index b27364136..af193fcbc 100644
+index 0bfa9466553..9c71fe6cdae 100644
 --- a/src/mono/browser/runtime/startup.ts
 +++ b/src/mono/browser/runtime/startup.ts
-@@ -369,7 +369,7 @@ async function postRunAsync (userpostRun: (() => void)[]) {
+@@ -368,7 +368,7 @@ async function postRunAsync (userpostRun: ((module:EmscriptenModule) => void)[])
  
          // create /usr/share folder which is SpecialFolder.CommonApplicationData
          Module["FS_createPath"]("/", "usr", true, true);
@@ -37,12 +37,12 @@ index b27364136..af193fcbc 100644
 +        Module["FS_createPath"]("/usr", "share", true, true);
  
          // all user Module.postRun callbacks
-         userpostRun.map(fn => fn());
+         userpostRun.map(fn => fn(Module));
 diff --git a/src/mono/mono/metadata/class-setup-vtable.c b/src/mono/mono/metadata/class-setup-vtable.c
-index b2f13d72d..c5cc67398 100644
+index 144abac0e50..f9aca344996 100644
 --- a/src/mono/mono/metadata/class-setup-vtable.c
 +++ b/src/mono/mono/metadata/class-setup-vtable.c
-@@ -773,6 +773,7 @@ mono_method_get_method_definition (MonoMethod *method)
+@@ -776,6 +776,7 @@ mono_method_get_method_definition (MonoMethod *method)
  static gboolean
  verify_class_overrides (MonoClass *klass, MonoMethod **overrides, int onum)
  {
@@ -51,10 +51,10 @@ index b2f13d72d..c5cc67398 100644
  	if (klass->image == mono_defaults.corlib)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
-index c74c5c12e..7d3ed6495 100644
+index 5600f3dc75d..e10c5eb7713 100644
 --- a/src/mono/mono/metadata/class.c
 +++ b/src/mono/mono/metadata/class.c
-@@ -2576,7 +2576,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
+@@ -2564,7 +2564,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
  			if (strcmp (name, mono_field_get_name (field)) != 0)
  				continue;
  
@@ -63,7 +63,7 @@ index c74c5c12e..7d3ed6495 100644
  				MonoClassField *gfield = mono_metadata_get_corresponding_field_from_generic_type_definition (field);
  				g_assert (gfield != NULL);
  				MonoType *field_type = gfield->type;
-@@ -6480,6 +6480,7 @@ can_access_member (MonoClass *access_klass, MonoClass *member_klass, MonoClass*
+@@ -6468,6 +6468,7 @@ can_access_member (MonoClass *access_klass, MonoClass *member_klass, MonoClass*
  gboolean
  mono_method_can_access_field (MonoMethod *method, MonoClassField *field)
  {
@@ -71,7 +71,7 @@ index c74c5c12e..7d3ed6495 100644
  	/* FIXME: check all overlapping fields */
  	int can = can_access_member (method->klass, m_field_get_parent (field), NULL, mono_field_get_type_internal (field)->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK);
  	if (!can) {
-@@ -6515,6 +6516,7 @@ mono_method_get_method_definition (MonoMethod *method)
+@@ -6503,6 +6504,7 @@ mono_method_get_method_definition (MonoMethod *method)
  gboolean
  mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
  {
@@ -79,7 +79,7 @@ index c74c5c12e..7d3ed6495 100644
  	method = mono_method_get_method_definition (method);
  	called = mono_method_get_method_definition (called);
  	return mono_method_can_access_method_full (method, called, NULL);
-@@ -6534,6 +6536,7 @@ mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
+@@ -6522,6 +6524,7 @@ mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
  gboolean
  mono_method_can_access_method_full (MonoMethod *method, MonoMethod *called, MonoClass *context_klass)
  {
@@ -88,10 +88,10 @@ index c74c5c12e..7d3ed6495 100644
  	if (method->wrapper_type != MONO_WRAPPER_NONE || called->wrapper_type != MONO_WRAPPER_NONE)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/icall.c b/src/mono/mono/metadata/icall.c
-index e326e7a7b..f0fb2a54e 100644
+index 182ede96e90..3187aafbe9b 100644
 --- a/src/mono/mono/metadata/icall.c
 +++ b/src/mono/mono/metadata/icall.c
-@@ -5566,15 +5566,81 @@ ves_icall_System_Reflection_RuntimeModule_InternalGetTypes (MonoImage *image, Mo
+@@ -5614,15 +5614,81 @@ ves_icall_System_Reflection_RuntimeModule_InternalGetTypes (MonoImage *image, Mo
  		MonoArrayHandle res = mono_module_get_types (image, exceptions, FALSE, error);
  		return_val_if_nok (error, MONO_HANDLE_CAST(MonoArray, NULL_HANDLE));
  
@@ -180,10 +180,10 @@ index e326e7a7b..f0fb2a54e 100644
  	}
  }
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index a74e9baaf..4b86d84f7 100644
+index 266c658ba15..4fa7adc26e6 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -3489,7 +3489,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
+@@ -3630,7 +3630,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
  	if (target_method == NULL) {
  		if (calli) {
  			CHECK_STACK_RET(td, 1, FALSE);
@@ -194,7 +194,7 @@ index a74e9baaf..4b86d84f7 100644
  				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
  			else {
  				csignature = mono_metadata_parse_signature_checked (image, token, error);
-@@ -9759,11 +9761,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
+@@ -10006,11 +10008,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
  	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
  	return_if_nok (error);
  

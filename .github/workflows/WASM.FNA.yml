@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt -y update
-          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev ninja-build pigz cpio spirv-headers
+          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers
       - name: Verify
         run: emcc -v
       - name: OpenSSL
@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           cd liba/
-          git clone -b v9.0.5 --depth=1 https://github.com/dotnet/runtime
+          git clone -b v10.0.0 --depth=1 https://github.com/dotnet/runtime
           emcc liba.c -r -o liba.o \
             -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
             -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
@@ -58,13 +58,12 @@ jobs:
         run: |
           cd liba/runtime/
           git apply ../../dotnet.patch
-          git apply ../../dotnet-jit.patch
           ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=true -c Release
           7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
       - name: SDL3
         shell: bash
         run: |
-          git clone -b release-3.2.2 https://github.com/libsdl-org/SDL
+          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
           cd SDL
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
           mkdir emscripten-build
@@ -78,26 +77,36 @@ jobs:
             -DSDL_PTHREADS=ON \
             -DSDL_PTHREADS_SEM=ON \
             -GNinja
-          ninja --verbose
+          ninja
       - name: FNA3D
         shell: bash
         run: |
-          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.02
+          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.11
           cd FNA3D
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
           mkdir build
           cd build
-          emcmake cmake .. -DBUILD_SDL3=ON -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a
-          emmake make
+          emcmake cmake .. \
+            -DBUILD_SDL3=ON \
+            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
+            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
+            -DBUILD_SHARED_LIBS=OFF \
+            -GNinja
+          ninja
       - name: FAudio
         shell: bash
         run: |           
-          git clone https://github.com/FNA-XNA/FAudio -b 25.02
+          git clone https://github.com/FNA-XNA/FAudio -b 25.11
           cd FAudio
           mkdir build
           cd build
-          emcmake cmake .. -DBUILD_SDL3=ON -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a
-          emmake make
+          emcmake cmake .. \
+            -DBUILD_SDL3=ON \
+            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
+            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
+            -DBUILD_SHARED_LIBS=OFF \
+            -GNinja
+          ninja
       - name: Copy Binaries (with new names)
         shell: bash
         run: |
