@@ -72,6 +72,7 @@ jobs:
           cd ..
           git clone -b release-2.32.58 https://github.com/libsdl-org/sdl2-compat
           cd sdl2-compat
+          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2.patch
           mkdir emscripten-build
           cd emscripten-build
           emcmake cmake -S .. \

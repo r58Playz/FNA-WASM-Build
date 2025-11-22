@@ -1,9 +1,50 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index eb8a0e5..349656e 100644
+index 3bac48a..3e7afc1 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -217,7 +217,7 @@ endif()
- add_library(SDL2 SHARED ${SDL2COMPAT_SRCS})
+@@ -92,7 +92,7 @@ set(SDL2COMPAT_VENDOR_INFO "" CACHE STRING "Vendor name and/or version to add to
+ set(SDL2COMPAT_FRAMEWORK FALSE)
+ #FIXME: should SDL2-compat modify vendor_info/revision information?
+ 
+-if(SDL2COMPAT_STATIC AND NOT (CMAKE_SYSTEM_NAME MATCHES "Linux"))
++if(SDL2COMPAT_STATIC AND NOT (CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "Emscripten"))
+   message(FATAL_ERROR "Static builds are only supported on Linux.")
+ endif()
+ 
+@@ -182,6 +182,27 @@ if(NOT TARGET SDL3::Headers)
+   set_property(TARGET SDL3::Headers PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${SDL3_INCLUDE_DIRS}")
+ endif()
+ 
++# Find SDL3 static library
++if(NOT TARGET SDL3::SDL3-static)
++  find_package(SDL3 QUIET)
++endif()
++
++if(NOT TARGET SDL3::SDL3-static)
++  set(SDL3_STATIC_LIBRARY "" CACHE FILEPATH "Path to SDL3 static library (e.g. libSDL3.a or SDL3.lib)")
++  if(SDL3_STATIC_LIBRARY AND EXISTS "${SDL3_STATIC_LIBRARY}")
++    get_property(SDL3_INCLUDE_DIRS TARGET SDL3::Headers PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
++    add_library(SDL3::SDL3-static STATIC IMPORTED)
++    set_target_properties(SDL3::SDL3-static PROPERTIES
++      IMPORTED_LOCATION "${SDL3_STATIC_LIBRARY}"
++      INTERFACE_INCLUDE_DIRECTORIES "${SDL3_INCLUDE_DIRS}"
++    )
++  endif()
++endif()
++
++if(NOT TARGET SDL3::SDL3-static)
++  message(FATAL_ERROR "Cannot find SDL3-static library. Please use -DSDL3_STATIC_LIBRARY=/path/to/libSDL3-static.a to specify its location.")
++endif()
++
+ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/REVISION.txt")
+   file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/REVISION.txt" REVISION_txt_lines)
+   list(GET REVISION_txt_lines 0 line0)
+@@ -268,10 +289,10 @@ if(APPLE)
+   endforeach()
+ endif()
+ 
+-add_library(SDL2 SHARED ${SDL2COMPAT_SRCS})
++add_library(SDL2 STATIC ${SDL2COMPAT_SRCS})
  add_library(SDL2::SDL2 ALIAS SDL2)
  SDL_AddCommonCompilerFlags(SDL2 WERROR "${SDL2COMPAT_WERROR}")
 -target_link_libraries(SDL2 PRIVATE $<BUILD_INTERFACE:SDL3::Headers>)
@@ -11,7 +52,7 @@ index eb8a0e5..349656e 100644
  target_include_directories(SDL2
    INTERFACE
      "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>"
-@@ -407,7 +407,7 @@ if(SDL2COMPAT_STATIC)
+@@ -471,7 +492,7 @@ if(SDL2COMPAT_STATIC)
    add_library(SDL2-static STATIC ${SDL2COMPAT_SRCS})
    add_library(SDL2::SDL2-static ALIAS SDL2-static)
    SDL_AddCommonCompilerFlags(SDL2-static WERROR "${SDL2COMPAT_WERROR}")
@@ -21,10 +62,10 @@ index eb8a0e5..349656e 100644
      INTERFACE
        "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>"
 diff --git a/src/sdl2_compat.c b/src/sdl2_compat.c
-index 7327b89..0a5e0d6 100644
+index f057cc4..2bb16c0 100644
 --- a/src/sdl2_compat.c
 +++ b/src/sdl2_compat.c
-@@ -120,6 +120,12 @@ This breaks the build when creating SDL_ ## DisableScreenSaver
+@@ -119,6 +119,12 @@ This breaks the build when creating SDL_ ## DisableScreenSaver
  extern "C" {
  #endif
  
@@ -37,8 +78,17 @@ index 7327b89..0a5e0d6 100644
  /** Define SDL2COMPAT_TEST_SYMS=1 to have warnings about wrong prototypes of src/sdl3_sym.h
   *  It won't compile but it helps to make sure it's sync'ed with SDL3 headers.
   */
-@@ -244,11 +250,25 @@ SDL2COMPAT_itoa(char *dst, int val)
-     } while (ptr > dst);
+@@ -222,7 +228,7 @@ do { \
+ #define PROP_TEXTURE_SCALE_MODE_UNAVAILABLE (-42)
+ 
+ 
+-static bool WantDebugLogging = false;
++static bool WantDebugLogging = true;
+ static SDL_InitState InitSDL2CompatGlobals;
+ 
+ typedef struct HintCallbackInfo
+@@ -359,11 +365,25 @@ static bool SDL2Compat_CheckDebugLogging(void)
+     return value && SDL2Compat_strequal(value, "1");
  }
  
 +#if defined(__unix__)
@@ -64,15 +114,16 @@ index 7327b89..0a5e0d6 100644
      static HMODULE Loaded_SDL3 = NULL;
      #define DIRSEP "\\"
      #define SDL3_LIBNAME "SDL3.dll"
-@@ -329,6 +349,7 @@ static char loaderror[256];
- static int SDL2Compat_InitOnStartup(void);
+@@ -444,7 +464,7 @@ static char loaderror[256];
+ #define DIRSEP "/"
+ #endif
  
- 
+-
 +#if !defined(STATIC_SDL3)
  static void *
  LoadSDL3Symbol(const char *fn, bool *okay)
  {
-@@ -343,6 +364,7 @@ LoadSDL3Symbol(const char *fn, bool *okay)
+@@ -459,6 +479,7 @@ LoadSDL3Symbol(const char *fn, bool *okay)
      }
      return retval;
  }
@@ -80,20 +131,35 @@ index 7327b89..0a5e0d6 100644
  
  static void
  UnloadSDL3(void)
-@@ -630,7 +652,11 @@ LoadSDL3(void)
+@@ -1020,8 +1041,12 @@ LoadSDL3(void)
          if (!okay) {
              SDL2COMPAT_stpcpy(loaderror, "Failed loading SDL3 library.");
          } else {
+-            /* Load SDL_GetVersion() alone first to allow us to check and log the required SDL3 version */
++#if defined(STATIC_SDL3)
++            SDL3_GetVersion = (SDL3_GetVersion_t) SDL3_renamed_SDL_GetVersion;
++#else
+             SDL3_GetVersion = (SDL3_GetVersion_t) LoadSDL3Symbol("SDL_GetVersion", &okay);
++#endif
++            /* Load SDL_GetVersion() alone first to allow us to check and log the required SDL3 version */
+             if (okay) {
+                 char sdl3verstr[16];
+                 char sdl3reqverstr[16];
+@@ -1077,7 +1102,12 @@ LoadSDL3(void)
+                     SDL2Compat_ApplyQuirks(force_x11);  /* Apply and maybe print a list of any enabled quirks. */
+                 }
+             }
++
 +#if defined(STATIC_SDL3)
 +            #define SDL3_SYM(rc,fn,params,args,ret) SDL3_##fn = (SDL3_##fn##_t) SDL3_renamed_SDL_##fn;
 +#else
              #define SDL3_SYM(rc,fn,params,args,ret) SDL3_##fn = (SDL3_##fn##_t) LoadSDL3Symbol("SDL_" #fn, &okay);
 +#endif
              #include "sdl3_syms.h"
-             if (okay) {
-                 const int sdl3version = SDL3_GetVersion();
+             if (!okay) {
+                 UnloadSDL3();
 diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
-index 03f86f5..22ff7e0 100644
+index d86e81e..6b1fb00 100644
 --- a/test/CMakeLists.txt
 +++ b/test/CMakeLists.txt
 @@ -28,7 +28,7 @@ function(test_program NAME)
@@ -105,4 +171,3 @@ index 03f86f5..22ff7e0 100644
    # Turn off MSVC's aggressive C runtime warnings for the old test programs.
    if(MSVC)
      target_compile_definitions(${NAME} PRIVATE ${HAVE_OPENGL_DEFINE} _CRT_SECURE_NO_WARNINGS _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
-
