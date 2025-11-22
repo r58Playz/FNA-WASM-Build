@@ -48,7 +48,7 @@ jobs:
           ninja
       - name: SDL2
         shell: bash
-        run: 
+        run: | 
           mkdir SDL2
           cd SDL2
           bash ../symbolrenamer.sh ../SDL/emscripten-build/libSDL3.a ./SDL3.renamed.h
