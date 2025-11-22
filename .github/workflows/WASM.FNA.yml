@@ -28,6 +28,95 @@ jobs:
           sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers
       - name: Verify
         run: emcc -v
+      - name: SDL3
+        shell: bash
+        run: |
+          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
+          cd SDL
+          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
+          mkdir emscripten-build
+          cd emscripten-build
+          CFLAGS="-pthread" emcmake cmake -S .. \
+            -DSDL_WERROR=ON \
+            -DSDL_TESTS=OFF \
+            -DSDL_INSTALL_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=prefix \
+            -DSDL_PTHREADS=ON \
+            -DSDL_PTHREADS_SEM=ON \
+            -GNinja
+          ninja
+      - name: SDL2
+        shell: bash
+        run: 
+          mkdir SDL2
+          cd SDL2
+          bash ../symbolrenamer.sh ../SDL/emscripten-build/libSDL3.a ./SDL3.renamed.h
+          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
+          cd SDL
+          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
+          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL3-SDL2.patch
+          mkdir emscripten-build
+          cd emscripten-build
+          emcmake cmake -S .. \
+            -DSDL_WERROR=OFF \
+            -DSDL_TESTS=OFF \
+            -DSDL_INSTALL_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=prefix \
+            -DSDL_PTHREADS=ON \
+            -DSDL_PTHREADS_SEM=ON \
+            -DCMAKE_C_FLAGS="-pthread -include /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL3.renamed.h" \
+            -GNinja
+          ninja
+          cd ..
+          git clone -b release-2.32.58 https://github.com/libsdl-org/sdl2-compat
+          cd sdl2-compat
+          mkdir emscripten-build
+          cd emscripten-build
+          emcmake cmake -S .. \
+            -DSDL3_INCLUDE_DIRS="/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL/include" \
+            -DSDL3_STATIC_LIBRARY="/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL/emscripten-build/libSDL3.a" \
+            -DSDL2COMPAT_STATIC=1 \
+            -DSDL2COMPAT_TESTS=OFF \
+            -DSDL2COMPAT_X11=OFF \
+            -DCMAKE_C_FLAGS="-pthread -DSTATIC_SDL3" \
+            -GNinja
+          ninja
+          cd ../..
+          cp sdl2-compat/SDL/emscripten-build/libSDL3.a .
+          cp sdl2-compat/emscripten-build/libSDL2-2.0.a libSDL2.a
+          emcc -r -o SDL2.o -Wl,--whole-archive libSDL2.a libSDL3.a
+          ar cr SDL2.a SDL2.o
+      - name: FNA3D
+        shell: bash
+        run: |
+          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.11
+          cd FNA3D
+          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
+          mkdir build
+          cd build
+          emcmake cmake .. \
+            -DBUILD_SDL3=ON \
+            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
+            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
+            -DBUILD_SHARED_LIBS=OFF \
+            -GNinja
+          ninja
+      - name: FAudio
+        shell: bash
+        run: |           
+          git clone https://github.com/FNA-XNA/FAudio -b 25.11
+          cd FAudio
+          mkdir build
+          cd build
+          emcmake cmake .. \
+            -DBUILD_SDL3=ON \
+            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
+            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
+            -DBUILD_SHARED_LIBS=OFF \
+            -GNinja
+          ninja
       - name: OpenSSL
         shell: bash
         run: |
@@ -60,53 +149,6 @@ jobs:
           git apply ../../dotnet.patch
           ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=true -c Release
           7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
-      - name: SDL3
-        shell: bash
-        run: |
-          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
-          cd SDL
-          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
-          mkdir emscripten-build
-          cd emscripten-build
-          CFLAGS="-pthread" emcmake cmake -S .. \
-            -DSDL_WERROR=ON \
-            -DSDL_TESTS=OFF \
-            -DSDL_INSTALL_TESTS=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=prefix \
-            -DSDL_PTHREADS=ON \
-            -DSDL_PTHREADS_SEM=ON \
-            -GNinja
-          ninja
-      - name: FNA3D
-        shell: bash
-        run: |
-          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.11
-          cd FNA3D
-          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
-          mkdir build
-          cd build
-          emcmake cmake .. \
-            -DBUILD_SDL3=ON \
-            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
-            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
-            -DBUILD_SHARED_LIBS=OFF \
-            -GNinja
-          ninja
-      - name: FAudio
-        shell: bash
-        run: |           
-          git clone https://github.com/FNA-XNA/FAudio -b 25.11
-          cd FAudio
-          mkdir build
-          cd build
-          emcmake cmake .. \
-            -DBUILD_SDL3=ON \
-            -DSDL3_INCLUDE_DIRS=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/include \
-            -DSDL3_LIBRARIES=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/libSDL3.a \
-            -DBUILD_SHARED_LIBS=OFF \
-            -GNinja
-          ninja
       - name: Copy Binaries (with new names)
         shell: bash
         run: |
@@ -115,6 +157,7 @@ jobs:
           cp ./liba/hot_reload_detour.o Binaries/hot_reload_detour.o
           cp ./liba/runtime.zip Binaries/dotnet.zip
           cp ./SDL/emscripten-build/libSDL3.a Binaries/SDL3.a
+          cp ./SDL2/SDL2.a Binaries/SDL2.a
           cp ./FNA3D/build/libFNA3D.a Binaries/FNA3D.a
           cp ./FNA3D/build/libmojoshader.a Binaries/libmojoshader.a    
           cp ./FAudio/build/libFAudio.a Binaries/FAudio.a

@@ -1,0 +1,57 @@
+diff --git a/src/stdlib/SDL_memcpy.c b/src/stdlib/SDL_memcpy.c
+index 315edf023..65c5dd99d 100644
+--- a/src/stdlib/SDL_memcpy.c
++++ b/src/stdlib/SDL_memcpy.c
+@@ -20,13 +20,7 @@
+ */
+ #include "SDL_internal.h"
+ 
+-
+-#ifdef SDL_memcpy
+-#undef SDL_memcpy
+-#endif
+-#if SDL_DYNAMIC_API
+-#define SDL_memcpy SDL_memcpy_REAL
+-#endif
++#define SDL_memcpy SDL3_renamed_SDL_memcpy
+ void *SDL_memcpy(SDL_OUT_BYTECAP(len) void *dst, SDL_IN_BYTECAP(len) const void *src, size_t len)
+ {
+ #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
+diff --git a/src/stdlib/SDL_memmove.c b/src/stdlib/SDL_memmove.c
+index 4e0d26c4b..b444c8311 100644
+--- a/src/stdlib/SDL_memmove.c
++++ b/src/stdlib/SDL_memmove.c
+@@ -20,13 +20,7 @@
+ */
+ #include "SDL_internal.h"
+ 
+-
+-#ifdef SDL_memmove
+-#undef SDL_memmove
+-#endif
+-#if SDL_DYNAMIC_API
+-#define SDL_memmove SDL_memmove_REAL
+-#endif
++#define SDL_memmove SDL3_renamed_SDL_memmove
+ void *SDL_memmove(SDL_OUT_BYTECAP(len) void *dst, SDL_IN_BYTECAP(len) const void *src, size_t len)
+ {
+ #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
+diff --git a/src/stdlib/SDL_memset.c b/src/stdlib/SDL_memset.c
+index 324f91787..574aff6d1 100644
+--- a/src/stdlib/SDL_memset.c
++++ b/src/stdlib/SDL_memset.c
+@@ -20,13 +20,7 @@
+ */
+ #include "SDL_internal.h"
+ 
+-
+-#ifdef SDL_memset
+-#undef SDL_memset
+-#endif
+-#if SDL_DYNAMIC_API
+-#define SDL_memset SDL_memset_REAL
+-#endif
++#define SDL_memset SDL3_renamed_SDL_memset
+ void *SDL_memset(SDL_OUT_BYTECAP(len) void *dst, int c, size_t len)
+ {
+ #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)

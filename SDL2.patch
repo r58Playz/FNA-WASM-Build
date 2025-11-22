@@ -1,0 +1,108 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eb8a0e5..349656e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -217,7 +217,7 @@ endif()
+ add_library(SDL2 SHARED ${SDL2COMPAT_SRCS})
+ add_library(SDL2::SDL2 ALIAS SDL2)
+ SDL_AddCommonCompilerFlags(SDL2 WERROR "${SDL2COMPAT_WERROR}")
+-target_link_libraries(SDL2 PRIVATE $<BUILD_INTERFACE:SDL3::Headers>)
++target_link_libraries(SDL2 PRIVATE $<BUILD_INTERFACE:SDL3::Headers> SDL3::SDL3-static)
+ target_include_directories(SDL2
+   INTERFACE
+     "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>"
+@@ -407,7 +407,7 @@ if(SDL2COMPAT_STATIC)
+   add_library(SDL2-static STATIC ${SDL2COMPAT_SRCS})
+   add_library(SDL2::SDL2-static ALIAS SDL2-static)
+   SDL_AddCommonCompilerFlags(SDL2-static WERROR "${SDL2COMPAT_WERROR}")
+-  target_link_libraries(SDL2-static PRIVATE $<BUILD_INTERFACE:SDL3::Headers>)
++  target_link_libraries(SDL2-static PRIVATE $<BUILD_INTERFACE:SDL3::Headers>  SDL3::SDL3-static)
+   target_include_directories(SDL2-static
+     INTERFACE
+       "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>"
+diff --git a/src/sdl2_compat.c b/src/sdl2_compat.c
+index 7327b89..0a5e0d6 100644
+--- a/src/sdl2_compat.c
++++ b/src/sdl2_compat.c
+@@ -120,6 +120,12 @@ This breaks the build when creating SDL_ ## DisableScreenSaver
+ extern "C" {
+ #endif
+ 
++#if defined(STATIC_SDL3)
++#define SDL3_SYM(rc,fn,params,args,ret) \
++    rc SDLCALL SDL3_renamed_SDL_##fn params;
++#include "sdl3_syms.h"
++#endif
++
+ /** Define SDL2COMPAT_TEST_SYMS=1 to have warnings about wrong prototypes of src/sdl3_sym.h
+  *  It won't compile but it helps to make sure it's sync'ed with SDL3 headers.
+  */
+@@ -244,11 +250,25 @@ SDL2COMPAT_itoa(char *dst, int val)
+     } while (ptr > dst);
+ }
+ 
++#if defined(__unix__)
++#include <dlfcn.h>
++#endif
+ 
+ /* Obviously we can't use SDL_LoadObject() to load SDL3.  :)  */
+ /* FIXME: Updated library names after https://github.com/libsdl-org/SDL/issues/5626 solidifies.  */
+ static char loaderror[256];
+-#if defined(_WIN32)
++#if defined(STATIC_SDL3)
++    static int Loaded_SDL3 = 0;
++    #if defined(_WIN32)
++        #define DIRSEP "\\"
++    #else
++        #define DIRSEP "/"
++    #endif
++    #define SDL3_LIBNAME Must_Be_Unused
++    #define LoadSDL3Library()  (Loaded_SDL3 = 1)
++    #define LookupSDL3Sym(sym) (void *)SDL3_renamed_SDL_##sym
++    #define CloseSDL3Library() do { Loaded_SDL3 = 0; } while (0)
++#elif defined(_WIN32)
+     static HMODULE Loaded_SDL3 = NULL;
+     #define DIRSEP "\\"
+     #define SDL3_LIBNAME "SDL3.dll"
+@@ -329,6 +349,7 @@ static char loaderror[256];
+ static int SDL2Compat_InitOnStartup(void);
+ 
+ 
++#if !defined(STATIC_SDL3)
+ static void *
+ LoadSDL3Symbol(const char *fn, bool *okay)
+ {
+@@ -343,6 +364,7 @@ LoadSDL3Symbol(const char *fn, bool *okay)
+     }
+     return retval;
+ }
++#endif
+ 
+ static void
+ UnloadSDL3(void)
+@@ -630,7 +652,11 @@ LoadSDL3(void)
+         if (!okay) {
+             SDL2COMPAT_stpcpy(loaderror, "Failed loading SDL3 library.");
+         } else {
++#if defined(STATIC_SDL3)
++            #define SDL3_SYM(rc,fn,params,args,ret) SDL3_##fn = (SDL3_##fn##_t) SDL3_renamed_SDL_##fn;
++#else
+             #define SDL3_SYM(rc,fn,params,args,ret) SDL3_##fn = (SDL3_##fn##_t) LoadSDL3Symbol("SDL_" #fn, &okay);
++#endif
+             #include "sdl3_syms.h"
+             if (okay) {
+                 const int sdl3version = SDL3_GetVersion();
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 03f86f5..22ff7e0 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -28,7 +28,7 @@ function(test_program NAME)
+   list(APPEND SDL2COMPAT_TEST_EXECUTABLES ${NAME})
+   set(SDL2COMPAT_TEST_EXECUTABLES ${SDL2COMPAT_TEST_EXECUTABLES} PARENT_SCOPE)
+   SDL_AddCommonCompilerFlags(${NAME} WERROR "${SDL2COMPAT_WERROR}")
+-  target_link_libraries(${NAME} PRIVATE SDL2::SDL2main SDL2::SDL2test SDL2::SDL2)
++  target_link_libraries(${NAME} PRIVATE SDL2::SDL2main SDL2::SDL2test SDL2::SDL2-static)
+   # Turn off MSVC's aggressive C runtime warnings for the old test programs.
+   if(MSVC)
+     target_compile_definitions(${NAME} PRIVATE ${HAVE_OPENGL_DEFINE} _CRT_SECURE_NO_WARNINGS _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+
