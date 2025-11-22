@@ -69,7 +69,7 @@ jobs:
             -DCMAKE_C_FLAGS="-pthread -include /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL3.renamed.h" \
             -GNinja
           ninja
-          cd ..
+          cd ../..
           git clone -b release-2.32.58 https://github.com/libsdl-org/sdl2-compat
           cd sdl2-compat
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2.patch
