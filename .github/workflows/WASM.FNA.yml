@@ -85,7 +85,7 @@ jobs:
             -GNinja
           ninja
           cd ../..
-          cp sdl2-compat/SDL/emscripten-build/libSDL3.a .
+          cp SDL/emscripten-build/libSDL3.a libSDL3.a
           cp sdl2-compat/emscripten-build/libSDL2-2.0.a libSDL2.a
           emcc -r -o SDL2.o -Wl,--whole-archive libSDL2.a libSDL3.a
           ar cr SDL2.a SDL2.o
