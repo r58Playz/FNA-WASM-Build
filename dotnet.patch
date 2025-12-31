@@ -1,5 +1,5 @@
 diff --git a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
-index f1f08d054..80f0cb096 100644
+index f1f08d054..c0beeb67c 100644
 --- a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
 +++ b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
 @@ -6,6 +6,7 @@
@@ -71,7 +71,7 @@ index f1f08d054..80f0cb096 100644
                  if (addMethod == null)
                  {
                      throw new InvalidOperationException(SR.XmlInternalError);
-@@ -612,7 +665,7 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
+@@ -612,15 +665,21 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
                          MemberInfo memberInfo = ReflectionXmlSerializationHelper.GetEffectiveSetInfo(o.GetType(), memberName);
                          Debug.Assert(memberInfo != null, "memberInfo could not be retrieved");
  
@@ -80,6 +80,79 @@ index f1f08d054..80f0cb096 100644
                          {
                              if (memberInfo is PropertyInfo propInfo)
                              {
+-                                result = new ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate(propInfo.SetValue);
++                                // Lambda is required to avoid TargetParameterCountException due to SetValue overload ambiguity
++#pragma warning disable IDE0200 // Remove unnecessary lambda expression
++                                result = new ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate((obj, val) => propInfo.SetValue(obj, val));
++#pragma warning restore IDE0200
+                             }
+                             else if (memberInfo is FieldInfo fieldInfo)
+                             {
+-                                result = new ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate(fieldInfo.SetValue);
++                                // Lambda is required to avoid TargetParameterCountException due to SetValue overload ambiguity
++#pragma warning disable IDE0200 // Remove unnecessary lambda expression
++                                result = new ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate((obj, val) => fieldInfo.SetValue(obj, val));
++#pragma warning restore IDE0200
+                             }
+                             else
+                             {
+@@ -1680,7 +1739,28 @@ private static XmlSerializationCollectionFixupCallback GetCreateCollectionOfObje
+                         // first before we make noise about not being able to set a list property.
+                         else if (isList && pi != null && (pi.SetMethod == null || !pi.SetMethod.IsPublic))
+                         {
+-                            var addMethod = mapping.TypeDesc.Type!.GetMethod("Add");
++                            MethodInfo? addMethod = null;
++                            try
++                            {
++                                addMethod = mapping.TypeDesc.Type!.GetMethod("Add");
++                            }
++                            catch (AmbiguousMatchException)
++                            {
++                                // When ambiguous, prefer single-parameter Add method for collections
++                                MethodInfo[] allMethods = mapping.TypeDesc.Type!.GetMethods();
++                                foreach (MethodInfo method in allMethods)
++                                {
++                                    if (method.Name == "Add")
++                                    {
++                                        ParameterInfo[] parameters = method.GetParameters();
++                                        if (parameters.Length == 1)
++                                        {
++                                            addMethod = method;
++                                            break;
++                                        }
++                                    }
++                                }
++                            }
+ 
+                             if (addMethod != null)
+                             {
+@@ -1813,10 +1893,13 @@ private static XmlSerializationCollectionFixupCallback GetCreateCollectionOfObje
+                     {
+                         MemberInfo[] memberInfos = o!.GetType().GetMember(member.Mapping.Name);
+                         MemberInfo memberInfo = memberInfos[0];
+-                        object? collection = null;
++                        object? collection = GetMemberValue(o, memberInfo);
++                        bool hadValue = collection != null;
+                         SetCollectionObjectWithCollectionMember(ref collection, member.Collection, member.Mapping.TypeDesc!.Type!);
++                        if (!hadValue) {
+                         var setMemberValue = GetSetMemberValueDelegate(o, memberInfo.Name);
+                         setMemberValue(o, collection);
++                        }
+                     }
+ 
+                     member.EnsureCollection?.Invoke(o!);
+@@ -2128,7 +2211,10 @@ public static SetMemberValueDelegate GetSetMemberValueDelegateWithType<TObj, TPa
+                 var setMethod = propInfo.GetSetMethod(true);
+                 if (setMethod == null)
+                 {
+-                    return propInfo.SetValue;
++                    // Lambda is required to avoid TargetParameterCountException due to SetValue overload ambiguity
++#pragma warning disable IDE0200 // Remove unnecessary lambda expression
++                    return (obj, val) => propInfo.SetValue(obj, val);
++#pragma warning restore IDE0200
+                 }
+ 
+                 setTypedDelegate = setMethod.CreateDelegate<Action<TObj, TParam>>();
 diff --git a/src/mono/browser/runtime/driver.c b/src/mono/browser/runtime/driver.c
 index 4122d53f6..72c82a1b9 100644
 --- a/src/mono/browser/runtime/driver.c
