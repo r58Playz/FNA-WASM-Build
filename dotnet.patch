@@ -1,5 +1,18 @@
+diff --git a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
+index f1f08d054..c434f8212 100644
+--- a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
++++ b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
+@@ -612,7 +612,7 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
+                         MemberInfo memberInfo = ReflectionXmlSerializationHelper.GetEffectiveSetInfo(o.GetType(), memberName);
+                         Debug.Assert(memberInfo != null, "memberInfo could not be retrieved");
+ 
+-                        if (type.IsValueType || !RuntimeFeature.IsDynamicCodeSupported)
++                        if (type.IsValueType || true)
+                         {
+                             if (memberInfo is PropertyInfo propInfo)
+                             {
 diff --git a/src/mono/browser/runtime/driver.c b/src/mono/browser/runtime/driver.c
-index 4122d53f69c..72c82a1b9ad 100644
+index 4122d53f6..72c82a1b9 100644
 --- a/src/mono/browser/runtime/driver.c
 +++ b/src/mono/browser/runtime/driver.c
 @@ -428,6 +428,7 @@ mono_wasm_profiler_init_browser_devtools (const char *desc)
@@ -26,7 +39,7 @@ index 4122d53f69c..72c82a1b9ad 100644
 \ No newline at end of file
 +}
 diff --git a/src/mono/browser/runtime/startup.ts b/src/mono/browser/runtime/startup.ts
-index 0bfa9466553..9c71fe6cdae 100644
+index 0bfa94665..9c71fe6cd 100644
 --- a/src/mono/browser/runtime/startup.ts
 +++ b/src/mono/browser/runtime/startup.ts
 @@ -368,7 +368,7 @@ async function postRunAsync (userpostRun: ((module:EmscriptenModule) => void)[])
@@ -39,7 +52,7 @@ index 0bfa9466553..9c71fe6cdae 100644
          // all user Module.postRun callbacks
          userpostRun.map(fn => fn(Module));
 diff --git a/src/mono/mono/metadata/class-setup-vtable.c b/src/mono/mono/metadata/class-setup-vtable.c
-index 144abac0e50..f9aca344996 100644
+index 144abac0e..f9aca3449 100644
 --- a/src/mono/mono/metadata/class-setup-vtable.c
 +++ b/src/mono/mono/metadata/class-setup-vtable.c
 @@ -776,6 +776,7 @@ mono_method_get_method_definition (MonoMethod *method)
@@ -51,7 +64,7 @@ index 144abac0e50..f9aca344996 100644
  	if (klass->image == mono_defaults.corlib)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
-index 5600f3dc75d..e10c5eb7713 100644
+index 5600f3dc7..e10c5eb77 100644
 --- a/src/mono/mono/metadata/class.c
 +++ b/src/mono/mono/metadata/class.c
 @@ -2564,7 +2564,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
@@ -88,7 +101,7 @@ index 5600f3dc75d..e10c5eb7713 100644
  	if (method->wrapper_type != MONO_WRAPPER_NONE || called->wrapper_type != MONO_WRAPPER_NONE)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/icall.c b/src/mono/mono/metadata/icall.c
-index 182ede96e90..3187aafbe9b 100644
+index 182ede96e..3187aafbe 100644
 --- a/src/mono/mono/metadata/icall.c
 +++ b/src/mono/mono/metadata/icall.c
 @@ -5614,15 +5614,81 @@ ves_icall_System_Reflection_RuntimeModule_InternalGetTypes (MonoImage *image, Mo
@@ -180,7 +193,7 @@ index 182ede96e90..3187aafbe9b 100644
  	}
  }
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 266c658ba15..4fa7adc26e6 100644
+index 266c658ba..4fa7adc26 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
 @@ -3630,7 +3630,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
