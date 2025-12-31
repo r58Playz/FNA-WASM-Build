@@ -1,5 +1,18 @@
+diff --git a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
+index f1f08d054..c434f8212 100644
+--- a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
++++ b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
+@@ -612,7 +612,7 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
+                         MemberInfo memberInfo = ReflectionXmlSerializationHelper.GetEffectiveSetInfo(o.GetType(), memberName);
+                         Debug.Assert(memberInfo != null, "memberInfo could not be retrieved");
+ 
+-                        if (type.IsValueType || !RuntimeFeature.IsDynamicCodeSupported)
++                        if (type.IsValueType || true)
+                         {
+                             if (memberInfo is PropertyInfo propInfo)
+                             {
 diff --git a/src/mono/browser/runtime/driver.c b/src/mono/browser/runtime/driver.c
-index 4122d53f69c..72c82a1b9ad 100644
+index 4122d53f6..72c82a1b9 100644
 --- a/src/mono/browser/runtime/driver.c
 +++ b/src/mono/browser/runtime/driver.c
 @@ -428,6 +428,7 @@ mono_wasm_profiler_init_browser_devtools (const char *desc)
