@@ -1,8 +1,77 @@
 diff --git a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
-index f1f08d054..c434f8212 100644
+index f1f08d054..80f0cb096 100644
 --- a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
 +++ b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/ReflectionXmlSerializationReader.cs
-@@ -612,7 +612,7 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
+@@ -6,6 +6,7 @@
+ using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.Diagnostics.CodeAnalysis;
++using System.Linq;
+ using System.Linq.Expressions;
+ using System.Reflection;
+ using System.Runtime.CompilerServices;
+@@ -579,7 +580,59 @@ private static void AddObjectsIntoTargetCollection(object targetCollection, List
+             }
+             else
+             {
+-                MethodInfo? addMethod = targetCollectionType.GetMethod("Add");
++                MethodInfo? addMethod = null;
++
++                // Try to find the most specific Add method by looking at the actual item type
++                if (sourceCollection.Count > 0 && sourceCollection[0] != null)
++                {
++                    Type itemType = sourceCollection[0]!.GetType();
++                    addMethod = targetCollectionType.GetMethod("Add", new Type[] { itemType });
++
++                    // If exact match not found, try to find compatible Add method
++                    if (addMethod == null)
++                    {
++                        MethodInfo[] allMethods = targetCollectionType.GetMethods();
++                        foreach (MethodInfo method in allMethods)
++                        {
++                            if (method.Name == "Add")
++                            {
++                                ParameterInfo[] parameters = method.GetParameters();
++                                if (parameters.Length == 1)
++                                {
++                                    Type paramType = parameters[0].ParameterType;
++                                    if (paramType.IsAssignableFrom(itemType))
++                                    {
++                                        addMethod = method;
++                                        break;
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++
++                // Fallback: try GetMethod("Add") but handle AmbiguousMatchException
++                if (addMethod == null)
++                {
++                    try
++                    {
++                        addMethod = targetCollectionType.GetMethod("Add");
++                    }
++                    catch (AmbiguousMatchException)
++                    {
++                        // When ambiguous, find the first Add method that takes a single parameter
++                        MethodInfo[] allMethods = targetCollectionType.GetMethods();
++                        foreach (MethodInfo method in allMethods)
++                        {
++                            if (method.Name == "Add" && method.GetParameters().Length == 1)
++                            {
++                                addMethod = method;
++                                break;
++                            }
++                        }
++                    }
++                }
++
+                 if (addMethod == null)
+                 {
+                     throw new InvalidOperationException(SR.XmlInternalError);
+@@ -612,7 +665,7 @@ private static ReflectionXmlSerializationReaderHelper.SetMemberValueDelegate Get
                          MemberInfo memberInfo = ReflectionXmlSerializationHelper.GetEffectiveSetInfo(o.GetType(), memberName);
                          Debug.Assert(memberInfo != null, "memberInfo could not be retrieved");
  
