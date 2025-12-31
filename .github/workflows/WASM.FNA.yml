@@ -23,7 +23,7 @@ env:
 on: 
   push:
     branches: 
-      - main 
+      - stardew 
   workflow_dispatch:
       
 jobs:
@@ -599,3 +599,5 @@ jobs:
           removeArtifacts: true
           artifacts: "release_assets/*"
           token: ${{ secrets.GITHUB_TOKEN }}
+          makeLatest: false
+          prerelease: true
