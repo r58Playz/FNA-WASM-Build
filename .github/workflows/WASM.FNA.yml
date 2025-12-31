@@ -231,8 +231,8 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          name: 'FNALibs WASM ${{ env.RELEASE_NAME }}'
-          body: 'FNA libraries compiled for WASM (Emscripten) with and without pthread support. Files prefixed with ST- are single-threaded (non-pthread) builds.'
+          name: '[stardew branch] FNALibs WASM ${{ env.RELEASE_NAME }}'
+          body: 'These are the FNA libs build for WASM (Emscripten) [stardew branch]'
           commit: ${{ github.ref_name }}
           tag: ${{ env.RELEASE_NAME }}
           removeArtifacts: true
