@@ -153,6 +153,62 @@ index f1f08d054..c0beeb67c 100644
                  }
  
                  setTypedDelegate = setMethod.CreateDelegate<Action<TObj, TParam>>();
+diff --git a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/Types.cs b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/Types.cs
+index dee8edf16..7eaeb06b1 100644
+--- a/src/libraries/System.Private.Xml/src/System/Xml/Serialization/Types.cs
++++ b/src/libraries/System.Private.Xml/src/System/Xml/Serialization/Types.cs
+@@ -1371,12 +1371,49 @@ private static TypeFlags GetConstructorFlags(
+                 PropertyInfo? p = enumerator.ReturnType.GetProperty("Current");
+                 Type currentType = (p == null ? typeof(object) : p.PropertyType);
+ 
+-                MethodInfo? addMethod = type.GetMethod("Add", new Type[] { currentType });
++                MethodInfo? addMethod = null;
++                try
++                {
++                    addMethod = type.GetMethod("Add", new Type[] { currentType });
++                }
++                catch (AmbiguousMatchException)
++                {
++                    foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance))
++                    {
++                        if (method.Name == "Add")
++                        {
++                            ParameterInfo[] parameters = method.GetParameters();
++                            if (parameters.Length == 1 && parameters[0].ParameterType.IsAssignableFrom(currentType))
++                            {
++                                addMethod = method;
++                                break;
++                            }
++                        }
++                    }
++                }
+ 
+                 if (addMethod == null && currentType != typeof(object))
+                 {
+                     currentType = typeof(object);
+-                    addMethod = type.GetMethod("Add", new Type[] { currentType });
++                    try
++                    {
++                        addMethod = type.GetMethod("Add", new Type[] { currentType });
++                    }
++                    catch (AmbiguousMatchException)
++                    {
++                        foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance))
++                        {
++                            if (method.Name == "Add")
++                            {
++                                ParameterInfo[] parameters = method.GetParameters();
++                                if (parameters.Length == 1 && parameters[0].ParameterType.IsAssignableFrom(currentType))
++                                {
++                                    addMethod = method;
++                                    break;
++                                }
++                            }
++                        }
++                    }
+                 }
+                 if (addMethod == null)
+                 {
 diff --git a/src/mono/browser/runtime/driver.c b/src/mono/browser/runtime/driver.c
 index 4122d53f6..72c82a1b9 100644
 --- a/src/mono/browser/runtime/driver.c
