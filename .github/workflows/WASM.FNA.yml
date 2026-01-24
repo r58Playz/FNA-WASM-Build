@@ -1,5 +1,14 @@
 name: WASM Build (FNA)
 
+env:
+  SDL_VERSION: release-3.2.26
+  SDL2COMPAT_VERSION: release-2.32.58
+  FNA3D_VERSION: 25.11
+  FAUDIO_VERSION: 25.11
+  OPENSSL_VERSION: openssl-3.4
+  DOTNET_RUNTIME_VERSION: v10.0.0
+  EMSDK_VERSION: 3.1.56
+
 on: 
   push:
     branches: 
@@ -7,21 +16,18 @@ on:
   workflow_dispatch:
       
 jobs:
-  windows:
+  build:
     strategy:
       matrix:
-        os: [ubuntu-latest]
-        variant: [Release]
-    runs-on: ${{ matrix.os }}
-    name: WASM ${{ matrix.variant }} on ${{ matrix.os }}
+        pthread_enabled: [true, false]
+    runs-on: ubuntu-latest
+    name: Build Libraries (pthread=${{ matrix.pthread_enabled }})
     steps:
-      - name: generate random name
-        run: echo RELEASE_NAME=$(uuidgen) >> $GITHUB_ENV
       - name: Check out source
         uses: actions/checkout@v1
       - uses: mymindstorm/setup-emsdk@v14
         with:
-          version: 3.1.56
+          version: ${{ env.EMSDK_VERSION }}
       - name: Install dependencies
         run: |
           sudo apt -y update
@@ -31,19 +37,21 @@ jobs:
       - name: SDL3
         shell: bash
         run: |
-          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
+          git clone -b ${{ env.SDL_VERSION }} https://github.com/libsdl-org/SDL
           cd SDL
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
           mkdir emscripten-build
           cd emscripten-build
-          CFLAGS="-pthread" emcmake cmake -S .. \
+          PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
+          PTHREAD_ENABLED=${{ matrix.pthread_enabled == true && 'ON' || 'OFF' }}
+          CFLAGS=$PTHREAD_FLAGS emcmake cmake -S .. \
             -DSDL_WERROR=ON \
             -DSDL_TESTS=OFF \
             -DSDL_INSTALL_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=prefix \
-            -DSDL_PTHREADS=ON \
-            -DSDL_PTHREADS_SEM=ON \
+            -DSDL_PTHREADS=$PTHREAD_ENABLED \
+            -DSDL_PTHREADS_SEM=$PTHREAD_ENABLED \
             -GNinja
           ninja
       - name: SDL2
@@ -52,36 +60,39 @@ jobs:
           mkdir SDL2
           cd SDL2
           bash ../symbolrenamer.sh ../SDL/emscripten-build/libSDL3.a ./SDL3.renamed.h
-          git clone -b release-3.2.26 https://github.com/libsdl-org/SDL
+          git clone -b ${{ env.SDL_VERSION }} https://github.com/libsdl-org/SDL
           cd SDL
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL3-SDL2.patch
           mkdir emscripten-build
           cd emscripten-build
+          PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
+          PTHREAD_ENABLED=${{ matrix.pthread_enabled == true && 'ON' || 'OFF' }}
           emcmake cmake -S .. \
             -DSDL_WERROR=OFF \
             -DSDL_TESTS=OFF \
             -DSDL_INSTALL_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=prefix \
-            -DSDL_PTHREADS=ON \
-            -DSDL_PTHREADS_SEM=ON \
-            -DCMAKE_C_FLAGS="-pthread -include /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL3.renamed.h" \
+            -DSDL_PTHREADS=$PTHREAD_ENABLED \
+            -DSDL_PTHREADS_SEM=$PTHREAD_ENABLED \
+            -DCMAKE_C_FLAGS="$PTHREAD_FLAGS -include /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL3.renamed.h" \
             -GNinja
           ninja
           cd ../..
-          git clone -b release-2.32.58 https://github.com/libsdl-org/sdl2-compat
+          git clone -b ${{ env.SDL2COMPAT_VERSION }} https://github.com/libsdl-org/sdl2-compat
           cd sdl2-compat
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2.patch
           mkdir emscripten-build
           cd emscripten-build
+          PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
           emcmake cmake -S .. \
             -DSDL3_INCLUDE_DIRS="/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL/include" \
             -DSDL3_STATIC_LIBRARY="/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL2/SDL/emscripten-build/libSDL3.a" \
             -DSDL2COMPAT_STATIC=1 \
             -DSDL2COMPAT_TESTS=OFF \
             -DSDL2COMPAT_X11=OFF \
-            -DCMAKE_C_FLAGS="-pthread -DSTATIC_SDL3" \
+            -DCMAKE_C_FLAGS="$PTHREAD_FLAGS -DSTATIC_SDL3" \
             -GNinja
           ninja
           cd ../..
@@ -92,7 +103,7 @@ jobs:
       - name: FNA3D
         shell: bash
         run: |
-          git clone --recursive https://github.com/FNA-XNA/FNA3D -b 25.11
+          git clone --recursive https://github.com/FNA-XNA/FNA3D -b ${{ env.FNA3D_VERSION }}
           cd FNA3D
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/FNA3D.patch
           mkdir build
@@ -107,7 +118,7 @@ jobs:
       - name: FAudio
         shell: bash
         run: |           
-          git clone https://github.com/FNA-XNA/FAudio -b 25.11
+          git clone https://github.com/FNA-XNA/FAudio -b ${{ env.FAUDIO_VERSION }}
           cd FAudio
           mkdir build
           cd build
@@ -125,18 +136,53 @@ jobs:
           PREFIX=$PWD/openssl/openssl-wasm
           mkdir -p $PREFIX  
           cd openssl
-          git clone -b openssl-3.4 --depth=1 https://github.com/openssl/openssl
+          git clone -b ${{ env.OPENSSL_VERSION }} --depth=1 https://github.com/openssl/openssl
           cd openssl
           export CFLAGS="-Wall -Oz"
           export CXXFLAGS="-Wall -Oz"
           emconfigure ./Configure linux-x32 --prefix=$PREFIX -no-asm -static -no-afalgeng -no-dso -DOPENSSL_SYS_NETWARE -DSIG_DFL=0 -DSIG_IGN=0 -DHAVE_FORK=0 -DOPENSSL_NO_AFALGENG=1 -DOPENSSL_NO_SPEED=1 -DOPENSSL_NO_DYNAMIC_ENGINE -DDLOPEN_FLAG=0
           sed -i 's|^CROSS_COMPILE.*$|CROSS_COMPILE=|g' Makefile
           emmake make -j$(nproc --all) build_generated libcrypto.a
+      - name: Copy Binaries (non-dotnet)
+        shell: bash
+        run: |
+          mkdir Binaries
+          PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
+          cp ./SDL/emscripten-build/libSDL3.a Binaries/${PREFIX}SDL3.a
+          cp ./SDL2/SDL2.a Binaries/${PREFIX}SDL2.a
+          cp ./FNA3D/build/libFNA3D.a Binaries/${PREFIX}FNA3D.a
+          cp ./FNA3D/build/libmojoshader.a Binaries/${PREFIX}libmojoshader.a    
+          cp ./FAudio/build/libFAudio.a Binaries/${PREFIX}FAudio.a
+          cp ./openssl/openssl/libcrypto.a Binaries/${PREFIX}libcrypto.a
+      - name: Archive Libraries (pthread=${{ matrix.pthread_enabled }})
+        uses: actions/upload-artifact@master
+        with:
+          name: WASM-libs-pthread-${{ matrix.pthread_enabled }}
+          path: Binaries/
+
+  build-dotnet:
+    strategy:
+      matrix:
+        pthread_enabled: [true, false]
+    runs-on: ubuntu-latest
+    name: Build Dotnet (pthread=${{ matrix.pthread_enabled }})
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v1
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - name: Install dependencies
+        run: |
+          sudo apt -y update
+          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers
+      - name: Verify
+        run: emcc -v
       - name: LibA
         shell: bash
         run: |
           cd liba/
-          git clone -b v10.0.0 --depth=1 https://github.com/dotnet/runtime
+          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/dotnet/runtime
           emcc liba.c -r -o liba.o \
             -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
             -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
@@ -148,35 +194,47 @@ jobs:
         run: |
           cd liba/runtime/
           git apply ../../dotnet.patch
-          ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=true -c Release
+          THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
+          ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=$THREADS_FLAG -c Release
           7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
-      - name: Copy Binaries (with new names)
+      - name: Copy Binaries (dotnet)
         shell: bash
         run: |
           mkdir Binaries
-          cp ./liba/liba.o Binaries/liba.o
-          cp ./liba/hot_reload_detour.o Binaries/hot_reload_detour.o
-          cp ./liba/runtime.zip Binaries/dotnet.zip
-          cp ./SDL/emscripten-build/libSDL3.a Binaries/SDL3.a
-          cp ./SDL2/SDL2.a Binaries/SDL2.a
-          cp ./FNA3D/build/libFNA3D.a Binaries/FNA3D.a
-          cp ./FNA3D/build/libmojoshader.a Binaries/libmojoshader.a    
-          cp ./FAudio/build/libFAudio.a Binaries/FAudio.a
-          cp ./openssl/openssl/libcrypto.a Binaries/libcrypto.a
-      - name: Compress Binaries
-        run: 7z a FNA-WASM.Binaries.zip Binaries/*
-      - name: Archive ${{ matrix.variant }} WASM archive on ${{ matrix.os }}
+          PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
+          cp ./liba/liba.o Binaries/${PREFIX}liba.o
+          cp ./liba/hot_reload_detour.o Binaries/${PREFIX}hot_reload_detour.o
+          cp ./liba/runtime.zip Binaries/${PREFIX}dotnet.zip
+      - name: Archive Dotnet (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
-          name: WASM Libraries for ${{ matrix.variant }} on ${{ matrix.os }}
-          path: FNA-WASM.Binaries.zip
-      - name: Make a release
+          name: WASM-dotnet-pthread-${{ matrix.pthread_enabled }}
+          path: Binaries/
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, build-dotnet]
+    name: Create Release
+    steps:
+      - name: Generate Release Name
+        run: echo RELEASE_NAME=$(uuidgen) >> $GITHUB_ENV
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Organize binaries for release
+        run: |
+          mkdir release_assets
+          find artifacts/ -type f | while read file; do
+            cp "$file" release_assets/
+          done
+      - name: Create Release
         uses: ncipollo/release-action@v1
         with:
           name: 'FNALibs WASM ${{ env.RELEASE_NAME }}'
-          body: 'These are the FNA libs build for WASM (Emscripten)'
+          body: 'FNA libraries compiled for WASM (Emscripten) with and without pthread support. Files prefixed with ST- are single-threaded (non-pthread) builds.'
           commit: ${{ github.ref_name }}
           tag: ${{ env.RELEASE_NAME }}
           removeArtifacts: true
-          artifacts: "Binaries/*"
+          artifacts: "release_assets/*"
           token: ${{ secrets.GITHUB_TOKEN }}
