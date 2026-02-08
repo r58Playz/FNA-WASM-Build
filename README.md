@@ -9,9 +9,10 @@ This repo is for automating the build of WebAssembly (WASM) native libraries for
 * [SDL2.a](https://github.com/libsdl-org/sdl2-compat) - Simple DirectMedia Layer (via sdl2-compat) 
 * [FNA3D.a](https://github.com/FNA-XNA/FNA3D) - 3D graphics library for FNA.
 * [FAudio.a](https://github.com/FNA-XNA/FAudio) - XAudio reimplementation for FNA.
-* [openssl](https://github.com/openssl/openssl) - OpenSSL WASM
+* [openssl](https://github.com/openssl/openssl) - OpenSSL WASM.
+* [libgdiplus.a](https://github.com/mono/libgdiplus) - Mono GDI+ for WASM.
 * `liba` + `hot_reload_detour` - Library used for MonoMod on WASM.
-* [dotnet](https://github.com/dotnet/runtime) - Patched dotnet wasm multithreaded runtime for MonoMod on WASM
+* [dotnet](https://github.com/dotnet/runtime) - Patched dotnet wasm multithreaded runtime for MonoMod on WASM.
 
 There is currently just one workflow:
 1.  **WASM Build (FNA)**.  
@@ -22,6 +23,7 @@ This fork contains a few patches (and uses SDL3 as the base):
 - `SDL2.patch` (for sdl2-compat) and `SDL3-SDL2.patch` (for sdl3) to build a cursed static build of sdl2-compat
 - `FNA3D.patch` adds `-pthread` to the `CFLAGS` so FNA3D is built with WASM threads support.
 - `dotnet.patch` patches the dotnet runtime so MonoMod can be used.
+- `glib.patch` disables gio, fuzzing, tools, and docs subdirectories in glib to allow building for WASM without unsupported dependencies.
 
 ## Usage
 
