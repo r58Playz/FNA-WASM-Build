@@ -18,7 +18,7 @@ env:
   LIBFFI_VERSION: v3.4.8
   GLIB_VERSION: "2.74.0"
   MONO_VERSION: main
-  DOTNET_SDK_VERSION: '8.0.x'
+  DOTNET_SDK_VERSION: '10.0.x'
 
 on: 
   push:
@@ -227,7 +227,7 @@ jobs:
       matrix:
         pthread_enabled: [true, false]
     runs-on: ubuntu-latest
-    name: Build libgdiplus + System.Drawing (pthread=${{ matrix.pthread_enabled }})
+    name: Build libgdiplus + System.Drawing.Common (pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
         uses: actions/checkout@v1
@@ -524,7 +524,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
-      - name: System.Drawing
+      - name: System.Drawing.Common
         shell: bash
         run: |
           git clone --depth=1 -b ${{ env.MONO_VERSION }} --recurse-submodules --shallow-submodules https://github.com/mono/mono
@@ -537,7 +537,7 @@ jobs:
           mkdir Binaries
           PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
           cp ./libgdiplus/src/.libs/libgdiplus.a Binaries/${PREFIX}libgdiplus.a
-          cp bin/Release/netstandard2.0/System.Drawing.dll Binaries/${PREFIX}System.Drawing.dll
+          cp bin/Release/netstandard2.0/System.Drawing.Common.dll Binaries/${PREFIX}System.Drawing.Common.dll
       - name: Archive libgdiplus (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
