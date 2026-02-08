@@ -1,0 +1,302 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>System.Drawing</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>CS0108;CS0114;CS0162;CS0169;CS0219;CS0414;CS0618;CS0649;CS0672;CS1030;CS0436;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CS8765;CS0067;CS0612;CS0168;CS0661;CS0660;CS0465</NoWarn>
+    <EnableDefaultItems>false</EnableDefaultItems>
+
+    <!-- MonoSourceDir should point to the root of the mono/mono checkout -->
+    <MonoSourceDir Condition="'$(MonoSourceDir)' == ''">mono</MonoSourceDir>
+    <SysDrawDir>$(MonoSourceDir)/mcs/class/System.Drawing</SysDrawDir>
+    <CoreFxDir>$(MonoSourceDir)/external/corefx/src</CoreFxDir>
+    <BuildCommonDir>$(MonoSourceDir)/mcs/build/common</BuildCommonDir>
+
+    <!-- Mono defines -->
+    <DefineConstants>$(DefineConstants);MONO;NET_4_6;MOBILE_PROFILE</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Embedded resources (icons) -->
+  <ItemGroup>
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Mono.ico" LogicalName="Mono.ico" />
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Information.ico" LogicalName="Information.ico" />
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Error.ico" LogicalName="Error.ico" />
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Warning.ico" LogicalName="Warning.ico" />
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Question.ico" LogicalName="Question.ico" />
+    <EmbeddedResource Include="$(SysDrawDir)/Assembly/Shield.ico" LogicalName="Shield.ico" />
+  </ItemGroup>
+
+  <!-- Source files: local mono sources -->
+  <ItemGroup>
+    <Compile Include="$(SysDrawDir)/System.Drawing/SR.cs" />
+    <Compile Include="$(SysDrawDir)/Assembly/AssemblyInfo.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/gdipFunctions.cs" />
+    <Compile Include="$(SysDrawDir)/corefx/SR.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Bitmap.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Brushes.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/BufferedGraphics.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/BufferedGraphicsManager.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/BufferedGraphicsContext.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/CharacterRange.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/macFunctions.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ColorTranslator.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ComIStreamMarshaler.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ComIStreamWrapper.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ContentAlignment.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/CopyPixelOperation.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ExternDll.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Font.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/FontConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/FontFamily.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Graphics.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/GraphicsUnit.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/gdipEnums.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/gdipStructs.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/KnownColors.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/IconConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Icon.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ImageAnimator.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ImageConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Image.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ImageFormatConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Pen.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Pens.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/RectangleConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/Region.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/SRDescriptionAttribute.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/StringFormat.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/SystemFonts.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/SystemIcons.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/SystemPens.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing/ToolboxBitmapAttribute.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Design/ToolboxItem.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Drawing2D/GraphicsContainer.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Drawing2D/GraphicsPath.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Drawing2D/LinearGradientBrush.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Drawing2D/Matrix.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Drawing2D/PathGradientBrush.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Imaging/BitmapData.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Imaging/ImageFormat.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Imaging/Metafile.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Imaging/MetafileHeader.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Imaging/MetaHeader.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/MarginsConverter.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintingServices.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintingServicesWin32.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintingServicesUnix.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PageSettings.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PreviewPrintController.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintController.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintDocument.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrinterSettings.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintEventArgs.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/PrintPageEventArgs.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Printing/StandardPrintController.cs" />
+    <Compile Include="$(SysDrawDir)/System.Drawing.Text/PrivateFontCollection.cs" />
+  </ItemGroup>
+
+  <!-- Source files: mono build/common -->
+  <ItemGroup>
+    <Compile Include="Consts.cs" />
+    <Compile Include="$(BuildCommonDir)/Locale.cs" />
+    <Compile Include="$(BuildCommonDir)/MonoTODOAttribute.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx System.Drawing.Common -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/ClientUtils.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/misc/HandleCollector.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Gdiplus.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/NativeMethods.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/UnsafeNativeMethods.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Internal/GPPOINT.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Internal/GPPOINTF.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Internal/GPRECT.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Internal/GPRECTF.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/AssemblyRef.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/BitmapSuffixInSameAssemblyAttribute.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/BitmapSuffixInSatelliteAssemblyAttribute.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Brush.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/ColorConverter.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/FontStyle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/IDeviceContext.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/PointConverter.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/RotateFlipType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/SolidBrush.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/StringAlignment.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/StringDigitSubstitute.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/StringFormatFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/StringTrimming.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/StringUnit.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/SystemBrushes.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/SystemColors.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/TextureBrush.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx System.Drawing.Common Design -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/UITypeEditorEditStyle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/IPropertyValueUIService.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/IToolboxItemProvider.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/PropertyValueUIItem.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/PropertyValueUIHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/PropertyValueUIItemInvokeHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/CategoryNameCollection.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/IToolboxService.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/IToolboxUser.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/PaintValueEventArgs.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxComponentsCreatedEventArgs.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxComponentsCreatedEventHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxComponentsCreatingEventArgs.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxComponentsCreatingEventHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxItemCreatorCallback.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/UITypeEditor.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Design/ToolboxItemCollection.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Drawing2D -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/AdjustableArrowCap.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/Blend.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/BrushType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/ColorBlend.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CombineMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CompositingMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CompositingQuality.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CoordinateSpace.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CustomLineCap.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CustomLineCapType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/DashCap.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/DashStyle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/FillMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/FlushIntention.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/GraphicsPathIterator.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/GraphicsState.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/HatchBrush.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/HatchStyle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/InterpolationMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/LinearGradientMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/LineCap.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/LineJoin.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/MatrixOrder.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/PathData.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/PathPointType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/PenAlignment.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/PenType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/PixelOffsetMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/QualityMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/RegionData.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/SafeCustomLineCapHandle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/SmoothingMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/WrapMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/WarpMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Drawing2D/CustomLineCap.Unix.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Imaging -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorAdjustType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorChannelFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorMap.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorMapType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorMatrix.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorMatrixFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ColorPalette.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EmfPlusRecordType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EmfType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EmfPlusFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/Encoder.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EncoderParameter.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EncoderParameters.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EncoderParameterValueType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/EncoderValue.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/FrameDimension.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageAttributes.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageCodecFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageCodecInfo.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageCodecInfoPrivate.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/ImageLockMode.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/MetafileFrameUnit.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/MetafileHeaderWmf.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/MetafileHeaderEmf.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/MetafileType.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/PaletteFlags.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/PixelFormat.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/PlayRecordCallback.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/PropertyItem.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/PropertyItemInternal.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Imaging/WmfPlaceableFileHeader.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Printing -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/Duplex.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/InvalidPrinterException.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/InvalidPrinterException.Serializable.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/Margins.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/Margins.Serializable.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperKinds.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperSize.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperSize.Serializable.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperSource.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperSource.Serializable.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PaperSourceKind.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PreviewPageInfo.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrinterResolution.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrinterResolution.Serializable.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrinterResolutionKind.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrinterUnit.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrinterUnitConvert.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrintEventHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrintAction.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrintPageEventHandler.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/PrintRange.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/QueryPageSettingsEventArgs.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Printing/QueryPageSettingsEventHandler.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Text -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Text/FontCollection.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Text/GenericFontFamilies.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Text/HotkeyPrefix.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Text/InstalledFontCollection.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Common/src/System/Drawing/Text/TextRenderingHint.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Primitives -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/Color.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/Point.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/PointF.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/Rectangle.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/RectangleF.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/Size.cs" />
+    <Compile Include="$(CoreFxDir)/System.Drawing.Primitives/src/System/Drawing/SizeF.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Common -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/Common/src/System/Numerics/Hashing/HashHelpers.cs" />
+    <Compile Include="$(CoreFxDir)/Common/src/System/Drawing/KnownColorTable.cs" />
+    <Compile Include="$(CoreFxDir)/Common/src/System/Drawing/ColorTable.cs" />
+    <Compile Include="$(CoreFxDir)/Common/src/System/Drawing/ColorUtil.netcoreapp21.cs" />
+    <Compile Include="$(CoreFxDir)/Common/src/System/Drawing/KnownColor.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx TypeConverter -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.ComponentModel.TypeConverter/src/System/Drawing/SizeConverter.cs" />
+    <Compile Include="$(CoreFxDir)/System.ComponentModel.TypeConverter/src/System/Drawing/SizeFConverter.cs" />
+  </ItemGroup>
+
+  <!-- Source files: corefx Security.Permissions -->
+  <ItemGroup>
+    <Compile Include="$(CoreFxDir)/System.Security.Permissions/src/System/Drawing/Printing/PrintingPermission.cs" />
+    <Compile Include="$(CoreFxDir)/System.Security.Permissions/src/System/Drawing/Printing/PrintingPermissionAttribute.cs" />
+    <Compile Include="$(CoreFxDir)/System.Security.Permissions/src/System/Drawing/Printing/PrintingPermissionLevel.cs" />
+  </ItemGroup>
+</Project>

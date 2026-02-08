@@ -17,6 +17,8 @@ env:
   EXPAT_VERSION: R_2_6_4
   LIBFFI_VERSION: v3.4.8
   GLIB_VERSION: "2.74.0"
+  MONO_VERSION: main
+  DOTNET_SDK_VERSION: '8.0.x'
 
 on: 
   push:
@@ -225,7 +227,7 @@ jobs:
       matrix:
         pthread_enabled: [true, false]
     runs-on: ubuntu-latest
-    name: Build libgdiplus (pthread=${{ matrix.pthread_enabled }})
+    name: Build libgdiplus + System.Drawing (pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
         uses: actions/checkout@v1
@@ -519,12 +521,23 @@ jobs:
             PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
             PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig"
           emmake make -C src -j$(nproc)
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+      - name: System.Drawing
+        shell: bash
+        run: |
+          git clone --depth=1 -b ${{ env.MONO_VERSION }} --recurse-submodules --shallow-submodules https://github.com/mono/mono
+          dotnet build $GITHUB_WORKSPACE/System.Drawing.csproj \
+            -c Release \
+            /p:MonoSourceDir=$PWD/mono
       - name: Copy Binaries (libgdiplus)
         shell: bash
         run: |
           mkdir Binaries
           PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
           cp ./libgdiplus/src/.libs/libgdiplus.a Binaries/${PREFIX}libgdiplus.a
+          cp bin/Release/netstandard2.0/System.Drawing.dll Binaries/${PREFIX}System.Drawing.dll
       - name: Archive libgdiplus (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
