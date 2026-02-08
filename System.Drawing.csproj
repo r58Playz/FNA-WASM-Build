@@ -17,6 +17,11 @@
     <DefineConstants>$(DefineConstants);MONO;NET_4_6;MOBILE_PROFILE</DefineConstants>
   </PropertyGroup>
 
+  <!-- NuGet packages needed for CAS types used by mono sources -->
+  <ItemGroup>
+    <PackageReference Include="System.Security.Permissions" Version="8.0.0" />
+  </ItemGroup>
+
   <!-- Embedded resources (icons) -->
   <ItemGroup>
     <EmbeddedResource Include="$(SysDrawDir)/Assembly/Mono.ico" LogicalName="Mono.ico" />
