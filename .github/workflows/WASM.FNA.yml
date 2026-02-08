@@ -223,7 +223,7 @@ jobs:
   build-gdiplus:
     strategy:
       matrix:
-        pthread_enabled: [true] # fails on no pthread and i don't really care about no pthread right now
+        pthread_enabled: [true, false]
     runs-on: ubuntu-latest
     name: Build libgdiplus (pthread=${{ matrix.pthread_enabled }})
     steps:
