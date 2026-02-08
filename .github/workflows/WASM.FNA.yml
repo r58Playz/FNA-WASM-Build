@@ -536,8 +536,25 @@ jobs:
         run: |
           mkdir Binaries
           PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
+          # Copy libgdiplus
           cp ./libgdiplus/src/.libs/libgdiplus.a Binaries/${PREFIX}libgdiplus.a
-          cp bin/Release/netstandard2.0/System.Drawing.Common.dll Binaries/${PREFIX}System.Drawing.Common.dll
+          # Copy all gdiplus dependencies from sysroot
+          cp $WASM_PREFIX/lib/libcairo.a Binaries/${PREFIX}libcairo.a
+          cp $WASM_PREFIX/lib/libpixman-1.a Binaries/${PREFIX}libpixman-1.a
+          cp $WASM_PREFIX/lib/libfreetype.a Binaries/${PREFIX}libfreetype.a
+          cp $WASM_PREFIX/lib/libfontconfig.a Binaries/${PREFIX}libfontconfig.a
+          cp $WASM_PREFIX/lib/libpng16.a Binaries/${PREFIX}libpng16.a
+          cp $WASM_PREFIX/lib/libz.a Binaries/${PREFIX}libz.a
+          cp $WASM_PREFIX/lib/libexpat.a Binaries/${PREFIX}libexpat.a
+          cp $WASM_PREFIX/lib/libglib-2.0.a Binaries/${PREFIX}libglib-2.0.a
+          cp $WASM_PREFIX/lib/libgobject-2.0.a Binaries/${PREFIX}libgobject-2.0.a
+          cp $WASM_PREFIX/lib/libgmodule-2.0.a Binaries/${PREFIX}libgmodule-2.0.a
+          cp $WASM_PREFIX/lib/libgthread-2.0.a Binaries/${PREFIX}libgthread-2.0.a
+          cp $WASM_PREFIX/lib/libffi.a Binaries/${PREFIX}libffi.a
+          # Copy pcre2 (glib dependency)
+          cp $WASM_PREFIX/lib/libpcre2-8.a Binaries/${PREFIX}libpcre2-8.a || true
+          # Copy System.Drawing.Common.dll
+          cp bin/Release/net10.0/System.Drawing.Common.dll Binaries/${PREFIX}System.Drawing.Common.dll
       - name: Archive libgdiplus (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
