@@ -1,0 +1,151 @@
+diff --git a/external/corefx b/external/corefx
+--- a/external/corefx
++++ b/external/corefx
+@@ -1 +1 @@
+-Subproject commit c4eeab9fc2faa0195a812e552cd73ee298d39386
++Subproject commit c4eeab9fc2faa0195a812e552cd73ee298d39386-dirty
+diff --git a/mcs/class/System.Drawing/System.Drawing/Font.cs b/mcs/class/System.Drawing/System.Drawing/Font.cs
+index 29d11922..bf940434 100644
+--- a/mcs/class/System.Drawing/System.Drawing/Font.cs
++++ b/mcs/class/System.Drawing/System.Drawing/Font.cs
+@@ -219,7 +219,7 @@ public static Font FromHfont (IntPtr hfont)
+ 			if (GDIPlus.RunningOnUnix ()) {
+ 				// If we're on Unix we use our private gdiplus API to avoid Wine 
+ 				// dependencies in S.D
+-				Status s = GDIPlus.GdipCreateFontFromHfont (hfont, out newObject, ref lf);
++				Status s = GDIPlus.GdipCreateFontFromHfontA (hfont, out newObject, ref lf);
+ 				GDIPlus.CheckStatus (s);
+ 			} else {
+ 
+@@ -567,7 +567,7 @@ public static Font FromLogFont (object lf, IntPtr hdc)
+ 		{
+ 			IntPtr newObject;
+ 			LOGFONT o = (LOGFONT)lf;
+-			Status status = GDIPlus.GdipCreateFontFromLogfont (hdc, ref o, out newObject);
++			Status status = GDIPlus.GdipCreateFontFromLogfontA (hdc, ref o, out newObject);
+ 			GDIPlus.CheckStatus (status);
+ 			return new Font (newObject, "Microsoft Sans Serif", FontStyle.Regular, 10);
+ 		}
+@@ -639,7 +639,7 @@ public void ToLogFont (object logFont, Graphics graphics)
+ 				try {
+ 					Marshal.StructureToPtr (logFont, copy, false);
+ 
+-					status = GDIPlus.GdipGetLogFont (NativeObject, graphics.NativeObject, logFont);
++					status = GDIPlus.GdipGetLogFontA (NativeObject, graphics.NativeObject, logFont);
+ 					if (status != Status.Ok) {
+ 						// reset to original values
+ 						Marshal.PtrToStructure (copy, logFont);
+diff --git a/mcs/class/System.Drawing/System.Drawing/Graphics.cs b/mcs/class/System.Drawing/System.Drawing/Graphics.cs
+index b94c0b00..04e19562 100644
+--- a/mcs/class/System.Drawing/System.Drawing/Graphics.cs
++++ b/mcs/class/System.Drawing/System.Drawing/Graphics.cs
+@@ -1737,7 +1737,7 @@ public static Graphics FromHwnd (IntPtr hwnd)
+ 				}
+ 
+ 				CocoaContext context = MacSupport.GetCGContextForNSView (hwnd);
+-				GDIPlus.GdipCreateFromContext_macosx (context.ctx, context.width, context.height, out graphics);
++				throw new NotSupportedException("Graphics.FromHwnd with macOS context not supported on WASM");
+ 
+ 				Graphics g = new Graphics (graphics);
+ 				g.maccontext = context;
+@@ -1747,7 +1747,7 @@ public static Graphics FromHwnd (IntPtr hwnd)
+ 
+ 			if (GDIPlus.UseCarbonDrawable) {
+ 				CarbonContext context = MacSupport.GetCGContextForView (hwnd);
+-				GDIPlus.GdipCreateFromContext_macosx (context.ctx, context.width, context.height, out graphics);
++				throw new NotSupportedException("Graphics.FromHwnd with Carbon context not supported on WASM");
+ 				
+ 				Graphics g = new Graphics (graphics);
+ 				g.maccontext = context;
+@@ -1805,8 +1805,7 @@ internal static Graphics FromXDrawable (IntPtr drawable, IntPtr display)
+ 		{
+ 			IntPtr graphics;
+ 
+-			Status s = GDIPlus.GdipCreateFromXDrawable_linux (drawable, display, out graphics);
+-			GDIPlus.CheckStatus (s);
++			throw new NotSupportedException("Graphics.FromXDrawable not supported on WASM");
+ 			return new Graphics (graphics);
+ 		}
+ 
+diff --git a/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs b/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
+index fe5a455f..83fed1ed 100644
+--- a/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
++++ b/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
+@@ -54,7 +54,7 @@ internal partial class Gdip : GDIPlus
+ 	/// <summary>
+ 	/// GDI+ API Functions
+ 	/// </summary>
+-	internal /*static*/ class GDIPlus {
++	public /*static*/ class GDIPlus {
+ 		public const int FACESIZE = 32;
+ 		public const int LANG_NEUTRAL = 0;
+ 		public static IntPtr Display = IntPtr.Zero;
+@@ -98,7 +98,7 @@ static void ProcessExit (object sender, EventArgs e)
+ #endif
+ 		}
+ 
+-		static GDIPlus ()
++		public static void InitGdiPlus ()
+ 		{
+ #if NETSTANDARD1_6
+ 			bool isUnix = !RuntimeInformation.IsOSPlatform (OSPlatform.Windows);
+@@ -153,7 +153,7 @@ static public bool RunningOnWindows ()
+ 
+ 		static public bool RunningOnUnix ()
+ 		{
+-			return UseX11Drawable || UseCarbonDrawable || UseCocoaDrawable;
++			return true;
+ 		}
+ 
+ 		// Copies a Ptr to an array of Points and releases the memory
+@@ -1453,17 +1453,17 @@ internal static extern int GdipSetImageAttributesWrapMode(HandleRef imageattr, /
+ 		[DllImport(GdiPlus)]
+ 		internal static extern Status GdipDeleteFont (IntPtr font);
+ 		[DllImport(GdiPlus, CharSet=CharSet.Auto)]
+-		internal static extern Status GdipGetLogFont(IntPtr font, IntPtr graphics, [MarshalAs(UnmanagedType.AsAny), Out] object logfontA);
++		internal static extern Status GdipGetLogFontA(IntPtr font, IntPtr graphics, [MarshalAs(UnmanagedType.AsAny), Out] object logfontA);
+ 
+ 		[DllImport(GdiPlus)]
+ 		internal static extern Status GdipCreateFontFromDC(IntPtr hdc, out IntPtr font);
+ 		[DllImport(GdiPlus, SetLastError=true, CharSet=CharSet.Auto)]
+-		internal static extern Status GdipCreateFontFromLogfont(IntPtr hdc, ref LOGFONT lf, out IntPtr ptr);
++		internal static extern Status GdipCreateFontFromLogfontA(IntPtr hdc, ref LOGFONT lf, out IntPtr ptr);
+ 
+ 		// These are our private functions, they exists in our own libgdiplus library, this way we
+ 		// avoid relying on wine in System.Drawing
+ 		[DllImport(GdiPlus, CharSet=CharSet.Ansi)]
+-		internal static extern Status GdipCreateFontFromHfont(IntPtr hdc, out IntPtr font, ref LOGFONT lf);
++		internal static extern Status GdipCreateFontFromHfontA(IntPtr hdc, out IntPtr font, ref LOGFONT lf);
+ 
+ 		// This is win32/gdi, not gdiplus, but it's easier to keep in here, also see above comment
+ 		[DllImport("gdi32.dll", CallingConvention=CallingConvention.StdCall, CharSet = CharSet.Auto)]
+@@ -1486,11 +1486,11 @@ internal static extern int GdipSetImageAttributesWrapMode(HandleRef imageattr, /
+ 		internal static extern IntPtr GetDesktopWindow ();
+ 
+ 		[DllImport("gdi32.dll", SetLastError=true)]
+-		public static extern int BitBlt(IntPtr hdcDest, int nXDest, int nYDest,
++		internal static extern int BitBlt(IntPtr hdcDest, int nXDest, int nYDest,
+ 			int nWidth, int nHeight, IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
+ 
+ 		[DllImport ("user32.dll", EntryPoint = "GetSysColor", CallingConvention = CallingConvention.StdCall)]
+-		public static extern uint Win32GetSysColor (GetSysColorIndex index);
++		internal static extern uint Win32GetSysColor (GetSysColorIndex index);
+ 
+ 
+ 		// Some special X11 stuff
+@@ -1946,15 +1946,11 @@ public StreamSizeDelegate SizeDelegate {
+ 		}
+ 
+ 		/* Mac only function calls */
+-		[DllImport(GdiPlus)]
+-		internal static extern Status GdipCreateFromContext_macosx (IntPtr cgref, int width, int height, out IntPtr graphics);
+ 
+ 		/* Linux only function calls*/
+ 		[DllImport(GdiPlus)]
+ 		internal static extern Status GdipSetVisibleClip_linux (IntPtr graphics, ref Rectangle rect);
+ 
+-		[DllImport(GdiPlus)]
+-		internal static extern Status GdipCreateFromXDrawable_linux (IntPtr drawable, IntPtr display, out IntPtr graphics);
+ 
+ 		// Stream functions for non-Win32 (libgdiplus specific)
+ 		[DllImport(GdiPlus)]

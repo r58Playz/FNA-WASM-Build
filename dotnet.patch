@@ -206,3 +206,16 @@ index 266c658ba15..4fa7adc26e6 100644
  	MONO_PROFILER_RAISE (jit_begin, (method));
  
  	if (mono_method_signature_internal (method)->is_inflated)
+diff --git a/src/mono/mono/mini/interp/interp.h b/src/mono/mono/mini/interp/interp.h
+index a09111c49..0f3473ca8 100644
+--- a/src/mono/mono/mini/interp/interp.h
++++ b/src/mono/mono/mini/interp/interp.h
+@@ -7,7 +7,7 @@
+ #include <mono/mini/mini-runtime.h>
+ 
+ #ifdef TARGET_WASM
+-#define INTERP_ICALL_TRAMP_IARGS 12
++#define INTERP_ICALL_TRAMP_IARGS 16
+ #define INTERP_ICALL_TRAMP_FARGS 12
+ #else
+ #define INTERP_ICALL_TRAMP_IARGS 12

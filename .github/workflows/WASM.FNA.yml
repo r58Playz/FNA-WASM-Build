@@ -475,8 +475,15 @@ jobs:
             -Dsysprof=disabled
           # Build only static libs, skip executables that fail to link
           ninja -C build glib/libglib-2.0.a gobject/libgobject-2.0.a gmodule/libgmodule-2.0.a gthread/libgthread-2.0.a
+          # Remove gstdio.c.o from libglib-2.0.a to avoid conflicts with dotnet runtime
+          # (g_fopen, g_rename, g_unlink are provided by dotnet)
+          cd build/glib
+          cp libglib-2.0.a libglib-2.0-dotnet.a
+          ar d libglib-2.0-dotnet.a gstdio.c.o
+          cd ../..
           # Install manually
           cp build/glib/libglib-2.0.a $WASM_PREFIX/lib/
+          cp build/glib/libglib-2.0-dotnet.a $WASM_PREFIX/lib/
           cp build/gobject/libgobject-2.0.a $WASM_PREFIX/lib/
           cp build/gmodule/libgmodule-2.0.a $WASM_PREFIX/lib/
           cp build/gthread/libgthread-2.0.a $WASM_PREFIX/lib/
@@ -528,6 +535,9 @@ jobs:
         shell: bash
         run: |
           git clone --depth=1 -b ${{ env.MONO_VERSION }} --recurse-submodules --shallow-submodules https://github.com/mono/mono
+          cd mono
+          git apply $GITHUB_WORKSPACE/system.drawing.patch
+          cd ..
           dotnet build $GITHUB_WORKSPACE/System.Drawing.csproj \
             -c Release \
             /p:MonoSourceDir=$PWD/mono
@@ -547,6 +557,7 @@ jobs:
           cp $WASM_PREFIX/lib/libz.a Binaries/${PREFIX}libz.a
           cp $WASM_PREFIX/lib/libexpat.a Binaries/${PREFIX}libexpat.a
           cp $WASM_PREFIX/lib/libglib-2.0.a Binaries/${PREFIX}libglib-2.0.a
+          cp $WASM_PREFIX/lib/libglib-2.0-dotnet.a Binaries/${PREFIX}libglib-2.0-dotnet.a
           cp $WASM_PREFIX/lib/libgobject-2.0.a Binaries/${PREFIX}libgobject-2.0.a
           cp $WASM_PREFIX/lib/libgmodule-2.0.a Binaries/${PREFIX}libgmodule-2.0.a
           cp $WASM_PREFIX/lib/libgthread-2.0.a Binaries/${PREFIX}libgthread-2.0.a
