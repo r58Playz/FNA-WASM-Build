@@ -1,0 +1,725 @@
+From f813007d092219b23d3becc783ec273ecec4f12a Mon Sep 17 00:00:00 2001
+From: Larry Ewing <lewing@microsoft.com>
+Date: Wed, 26 Nov 2025 14:35:43 -0600
+Subject: [PATCH] [browser][mono] Make sure we treat the 4GB ptrs as unsigned
+ (#121221)
+
+Fixes problems with pointers over 2GB mark. This is still `use on your
+own risk`
+
+- crypto buffers
+- debugger buffers
+- WS buffers
+- event-pipe buffers
+- jiterp traces, dropped support for unused `constantSlots` feature
+- JS MemoryView,Span
+- various memory JS APIs
+- asset loading
+- string marshaling
+
+Related https://github.com/dotnet/runtime/pull/109079
+Related https://github.com/dotnet/runtime/issues/58382
+
+---------
+
+Co-authored-by: pavelsavara <pavel.savara@gmail.com>
+Co-authored-by: Pavel Savara <pavelsavara@microsoft.com>
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+---
+ src/mono/browser/runtime/crypto.ts            |  1 +
+ src/mono/browser/runtime/debug.ts             |  6 +-
+ .../browser/runtime/diagnostics/common.ts     |  2 +-
+ src/mono/browser/runtime/diagnostics/index.ts |  2 +-
+ .../runtime/jiterpreter-interp-entry.ts       | 11 ++--
+ .../browser/runtime/jiterpreter-jit-call.ts   | 14 ++++-
+ .../browser/runtime/jiterpreter-support.ts    | 63 ++++---------------
+ .../runtime/jiterpreter-trace-generator.ts    | 11 ++--
+ src/mono/browser/runtime/jiterpreter.ts       | 19 +++---
+ src/mono/browser/runtime/marshal.ts           |  5 +-
+ src/mono/browser/runtime/memory.ts            | 13 ++--
+ src/mono/browser/runtime/roots.ts             |  4 +-
+ src/mono/browser/runtime/startup.ts           |  6 +-
+ src/mono/browser/runtime/strings.ts           | 12 ++--
+ src/mono/browser/runtime/web-socket.ts        | 10 +--
+ 17 files changed, 85 insertions(+), 99 deletions(-)
+
+diff --git a/src/mono/browser/runtime/crypto.ts b/src/mono/browser/runtime/crypto.ts
+index 896783a40e3ad8..8d6cbd253f0a8b 100644
+--- a/src/mono/browser/runtime/crypto.ts
++++ b/src/mono/browser/runtime/crypto.ts
+@@ -16,6 +16,7 @@ export function SystemJS_RandomBytes (bufferPtr: number, bufferLength: number):
+         return -1;
+     }
+ 
++    bufferPtr = bufferPtr >>> 0;
+     const memoryView = localHeapViewU8();
+     const targetView = memoryView.subarray(bufferPtr, bufferPtr + bufferLength);
+ 
+diff --git a/src/mono/browser/runtime/debug.ts b/src/mono/browser/runtime/debug.ts
+index 522c3c41158b28..45d1714cc84a17 100644
+--- a/src/mono/browser/runtime/debug.ts
++++ b/src/mono/browser/runtime/debug.ts
+@@ -6,7 +6,7 @@ import { toBase64StringImpl } from "./base64";
+ import cwraps from "./cwraps";
+ import { VoidPtr, CharPtr } from "./types/emscripten";
+ import { mono_log_warn } from "./logging";
+-import { forceThreadMemoryViewRefresh, free, localHeapViewU8, malloc } from "./memory";
++import { forceThreadMemoryViewRefresh, fixupPointer, free, localHeapViewU8, malloc } from "./memory";
+ import { utf8ToString } from "./strings";
+ const commands_received: any = new Map<number, CommandResponse>();
+ commands_received.remove = function (key: number): CommandResponse {
+@@ -42,12 +42,12 @@ export function mono_wasm_fire_debugger_agent_message_with_data_to_pause (base64
+ }
+ 
+ export function mono_wasm_fire_debugger_agent_message_with_data (data: number, len: number): void {
+-    const base64String = toBase64StringImpl(new Uint8Array(localHeapViewU8().buffer, data, len));
++    const base64String = toBase64StringImpl(new Uint8Array(localHeapViewU8().buffer, fixupPointer(data, 0), len));
+     mono_wasm_fire_debugger_agent_message_with_data_to_pause(base64String);
+ }
+ 
+ export function mono_wasm_add_dbg_command_received (res_ok: boolean, id: number, buffer: number, buffer_len: number): void {
+-    const dbg_command = new Uint8Array(localHeapViewU8().buffer, buffer, buffer_len);
++    const dbg_command = new Uint8Array(localHeapViewU8().buffer, fixupPointer(buffer, 0), buffer_len);
+     const base64String = toBase64StringImpl(dbg_command);
+     const buffer_obj = {
+         res_ok,
+diff --git a/src/mono/browser/runtime/diagnostics/common.ts b/src/mono/browser/runtime/diagnostics/common.ts
+index 53911d3e23ef63..d67e03e3204be3 100644
+--- a/src/mono/browser/runtime/diagnostics/common.ts
++++ b/src/mono/browser/runtime/diagnostics/common.ts
+@@ -51,7 +51,7 @@ export class DiagnosticConnectionBase {
+         }
+         const message = this.messagesReceived[0]!;
+         const bytes_read = Math.min(message.length, bytes_to_read);
+-        Module.HEAPU8.set(message.subarray(0, bytes_read), buffer as any);
++        Module.HEAPU8.set(message.subarray(0, bytes_read), buffer as any >>> 0);
+         if (bytes_read === message.length) {
+             this.messagesReceived.shift();
+         } else {
+diff --git a/src/mono/browser/runtime/diagnostics/index.ts b/src/mono/browser/runtime/diagnostics/index.ts
+index 660ac47d8dcc82..c46fbd7822f077 100644
+--- a/src/mono/browser/runtime/diagnostics/index.ts
++++ b/src/mono/browser/runtime/diagnostics/index.ts
+@@ -40,7 +40,7 @@ export function setRuntimeGlobals (globalObjects: GlobalObjects): void {
+         if (!wrapper) {
+             return -1;
+         }
+-        const message = (new Uint8Array(Module.HEAPU8.buffer, buffer as any, bytes_to_write)).slice();
++        const message = (new Uint8Array(Module.HEAPU8.buffer, buffer as any >>> 0, bytes_to_write)).slice();
+         return wrapper.send(message);
+     };
+ 
+diff --git a/src/mono/browser/runtime/jiterpreter-interp-entry.ts b/src/mono/browser/runtime/jiterpreter-interp-entry.ts
+index 2280d81aad4b91..e3025366ede1e1 100644
+--- a/src/mono/browser/runtime/jiterpreter-interp-entry.ts
++++ b/src/mono/browser/runtime/jiterpreter-interp-entry.ts
+@@ -167,7 +167,7 @@ export function mono_jiterp_free_method_data_interp_entry (imethod: number) {
+ // FIXME: move this counter into C and make it thread safe
+ export function mono_interp_record_interp_entry (imethod: number) {
+     // clear the unbox bit
+-    imethod = imethod & ~0x1;
++    imethod = (imethod & ~0x1) >>> 0;
+ 
+     const info = infoTable[imethod];
+     // This shouldn't happen but it's not worth crashing over
+@@ -199,6 +199,10 @@ export function mono_interp_jit_wasm_entry_trampoline (
+     if (argumentCount > maxInlineArgs)
+         return 0;
+ 
++    imethod = imethod >>> 0;
++    method = method as any >>> 0 as any;
++    pParamTypes = pParamTypes as any >>> 0 as any;
++
+     const info = new TrampolineInfo(
+         imethod, method, argumentCount, pParamTypes,
+         unbox, hasThisReference, hasReturnValue, defaultImplementation
+@@ -265,10 +269,9 @@ function flush_wasm_entry_trampoline_jit_queue () {
+ 
+     // If the function signature contains types that need stackval_from_data, that'll use
+     //  some constant slots, so make some extra space
+-    const constantSlots = (4 * jitQueue.length) + 1;
+     let builder = trampBuilder;
+     if (!builder) {
+-        trampBuilder = builder = new WasmBuilder(constantSlots);
++        trampBuilder = builder = new WasmBuilder();
+ 
+         builder.defineType(
+             "unbox",
+@@ -303,7 +306,7 @@ function flush_wasm_entry_trampoline_jit_queue () {
+             WasmValtype.void, true
+         );
+     } else
+-        builder.clear(constantSlots);
++        builder.clear();
+ 
+     if (builder.options.wasmBytesLimit <= getCounter(JiterpCounter.BytesGenerated)) {
+         return;
+diff --git a/src/mono/browser/runtime/jiterpreter-jit-call.ts b/src/mono/browser/runtime/jiterpreter-jit-call.ts
+index e14786d7ce40ef..3175cc5a758e5a 100644
+--- a/src/mono/browser/runtime/jiterpreter-jit-call.ts
++++ b/src/mono/browser/runtime/jiterpreter-jit-call.ts
+@@ -182,6 +182,11 @@ function getWasmTableEntry (index: number) {
+ export function mono_interp_invoke_wasm_jit_call_trampoline (
+     thunkIndex: number, ret_sp: number, sp: number, ftndesc: number, thrown: NativePointer
+ ) {
++    ret_sp = ret_sp as any >>> 0 as any;
++    sp = sp as any >>> 0 as any;
++    ftndesc = ftndesc as any >>> 0 as any;
++    thrown = thrown as any >>> 0 as any;
++
+     const thunk = <Function>getWasmTableEntry(thunkIndex);
+     try {
+         thunk(ret_sp, sp, ftndesc, thrown);
+@@ -234,6 +239,11 @@ export function mono_interp_jit_wasm_jit_call_trampoline (
+     method: MonoMethod, rmethod: VoidPtr, cinfo: VoidPtr,
+     arg_offsets: VoidPtr, catch_exceptions: number
+ ): void {
++    method = method as any >>> 0 as any;
++    rmethod = rmethod as any >>> 0 as any;
++    cinfo = cinfo as any >>> 0 as any;
++    arg_offsets = arg_offsets as any >>> 0 as any;
++
+     // multiple cinfos can share the same target function, so for that scenario we want to
+     //  use the same TrampolineInfo for all of them. if that info has already been jitted
+     //  we want to immediately store its pointer into the cinfo, otherwise we add it to
+@@ -296,7 +306,7 @@ export function mono_interp_flush_jitcall_queue (): void {
+ 
+     let builder = trampBuilder;
+     if (!builder) {
+-        trampBuilder = builder = new WasmBuilder(0);
++        trampBuilder = builder = new WasmBuilder();
+         // Function type for compiled trampolines
+         builder.defineType(
+             "trampoline",
+@@ -316,7 +326,7 @@ export function mono_interp_flush_jitcall_queue (): void {
+         builder.defineImportedFunction("i", "begin_catch", "begin_catch", true, getRawCwrap("mono_jiterp_begin_catch"));
+         builder.defineImportedFunction("i", "end_catch", "end_catch", true, getRawCwrap("mono_jiterp_end_catch"));
+     } else
+-        builder.clear(0);
++        builder.clear();
+ 
+     if (builder.options.wasmBytesLimit <= getCounter(JiterpCounter.BytesGenerated)) {
+         cwraps.mono_jiterp_tlqueue_clear(JitQueue.JitCall);
+diff --git a/src/mono/browser/runtime/jiterpreter-support.ts b/src/mono/browser/runtime/jiterpreter-support.ts
+index cc593b855c9ff3..3235406cae7894 100644
+--- a/src/mono/browser/runtime/jiterpreter-support.ts
++++ b/src/mono/browser/runtime/jiterpreter-support.ts
+@@ -103,10 +103,8 @@ export class WasmBuilder {
+     traceBuf: Array<string> = [];
+     branchTargets = new Set<MintOpcodePtr>();
+     options!: JiterpreterOptions;
+-    constantSlots: Array<number> = [];
+     backBranchOffsets: Array<MintOpcodePtr> = [];
+     callHandlerReturnAddresses: Array<MintOpcodePtr> = [];
+-    nextConstantSlot = 0;
+     backBranchTraceLevel = 0;
+ 
+     containsSimd!: boolean;
+@@ -115,14 +113,14 @@ export class WasmBuilder {
+     compressImportNames = false;
+     lockImports = false;
+ 
+-    constructor (constantSlotCount: number) {
++    constructor () {
+         this.stack = [new BlobBuilder()];
+-        this.clear(constantSlotCount);
++        this.clear();
+         this.cfg = new Cfg(this);
+         this.defineType("__cpp_exception", { "ptr": WasmValtype.i32 }, WasmValtype.void, true);
+     }
+ 
+-    clear (constantSlotCount: number) {
++    clear () {
+         this.options = getOptions();
+         if (this.options.maxModuleSize >= blobBuilderCapacity)
+             throw new Error(`blobBuilderCapacity ${blobBuilderCapacity} is not large enough for jiterpreter-max-module-size of ${this.options.maxModuleSize}`);
+@@ -154,10 +152,6 @@ export class WasmBuilder {
+         this.traceBuf.length = 0;
+         this.branchTargets.clear();
+         this.activeBlocks = 0;
+-        this.nextConstantSlot = 0;
+-        this.constantSlots.length = this.options.useConstants ? constantSlotCount : 0;
+-        for (let i = 0; i < this.constantSlots.length; i++)
+-            this.constantSlots[i] = 0;
+         this.backBranchOffsets.length = 0;
+         this.callHandlerReturnAddresses.length = 0;
+ 
+@@ -209,7 +203,6 @@ export class WasmBuilder {
+ 
+         const exceptionTag = this.getExceptionTag();
+         const result: any = {
+-            c: <any>this.getConstants(),
+             m: { h: memory },
+         };
+         if (exceptionTag)
+@@ -328,22 +321,10 @@ export class WasmBuilder {
+     }
+ 
+     ptr_const (pointer: number | ManagedPointer | NativePointer) {
+-        let idx = this.options.useConstants ? this.constantSlots.indexOf(<any>pointer) : -1;
+-        if (
+-            this.options.useConstants &&
+-            (idx < 0) && (this.nextConstantSlot < this.constantSlots.length)
+-        ) {
+-            idx = this.nextConstantSlot++;
+-            this.constantSlots[idx] = <any>pointer;
+-        }
+-
+-        if (idx >= 0) {
+-            this.appendU8(WasmOpcode.get_global);
+-            this.appendLeb(idx);
+-        } else {
+-            // mono_log_info(`Warning: no constant slot for ${pointer} (${this.nextConstantSlot} slots used)`);
+-            this.i32_const(pointer);
+-        }
++        // mono_log_info(`Warning: no constant slot for ${pointer} (${this.nextConstantSlot} slots used)`);
++        this.appendU8(WasmOpcode.i32_const);
++        // i32_const is always signed
++        this.appendLeb((pointer as any) | 0);
+     }
+ 
+     ip_const (value: MintOpcodePtr) {
+@@ -507,7 +488,7 @@ export class WasmBuilder {
+         this.appendULeb(
+             1 + // memory
+             (enableWasmEh ? 1 : 0) + // c++ exception tag
+-            importsToEmit.length + this.constantSlots.length +
++            importsToEmit.length +
+             ((includeFunctionTable !== false) ? 1 : 0)
+         );
+ 
+@@ -521,14 +502,6 @@ export class WasmBuilder {
+             this.appendU8(ifi.typeIndex);
+         }
+ 
+-        for (let i = 0; i < this.constantSlots.length; i++) {
+-            this.appendName("c");
+-            this.appendName(i.toString(shortNameBase));
+-            this.appendU8(0x03); // global
+-            this.appendU8(WasmValtype.i32); // all constants are pointers right now
+-            this.appendU8(0x00); // constant
+-        }
+-
+         // import the native heap
+         this.appendName("m");
+         this.appendName("h");
+@@ -909,7 +882,8 @@ export class WasmBuilder {
+ 
+     appendMemarg (offset: number, alignPower: number) {
+         this.appendULeb(alignPower);
+-        this.appendULeb(offset);
++        // u64
++        this.appendULeb(offset >>> 0);
+     }
+ 
+     /*
+@@ -919,10 +893,9 @@ export class WasmBuilder {
+         if (typeof (ptr1) === "string")
+             this.local(ptr1);
+         else
+-            this.i32_const(ptr1);
++            this.ptr_const(ptr1);
+ 
+         this.i32_const(offset);
+-        // FIXME: How do we make sure this has correct semantics for pointers over 2gb?
+         this.appendU8(WasmOpcode.i32_add);
+     }
+ 
+@@ -931,13 +904,6 @@ export class WasmBuilder {
+             throw new Error("Jiterpreter block stack not empty");
+         return this.stack[0].getArrayView(fullCapacity);
+     }
+-
+-    getConstants () {
+-        const result: { [key: string]: number } = {};
+-        for (let i = 0; i < this.constantSlots.length; i++)
+-            result[i.toString(shortNameBase)] = this.constantSlots[i];
+-        return result;
+-    }
+ }
+ 
+ export class BlobBuilder {
+@@ -1617,7 +1583,7 @@ export function append_profiler_event (builder: WasmBuilder, ip: MintOpcodePtr,
+             throw new Error(`Unimplemented profiler event ${opcode}`);
+     }
+     builder.local("frame");
+-    builder.i32_const(ip);
++    builder.ptr_const(ip);
+     builder.callImport(event_name);
+ }
+ 
+@@ -1633,7 +1599,7 @@ export function append_safepoint (builder: WasmBuilder, ip: MintOpcodePtr) {
+     builder.block(WasmValtype.void, WasmOpcode.if_);
+     builder.local("frame");
+     // Not ip_const, because we can't pass relative IP to do_safepoint
+-    builder.i32_const(ip);
++    builder.ptr_const(ip);
+     builder.callImport("safepoint");
+     builder.endBlock();
+ }
+@@ -2020,8 +1986,6 @@ export type JiterpreterOptions = {
+     countBailouts: boolean;
+     // Dump the wasm blob for all compiled traces
+     dumpTraces: boolean;
+-    // Use runtime imports for pointer constants
+-    useConstants: boolean;
+     // Enable performing backward branches without exiting traces
+     noExitBackwardBranches: boolean;
+     // Unwrap gsharedvt wrappers when compiling jitcalls if possible
+@@ -2062,7 +2026,6 @@ const optionNames: { [jsName: string]: string } = {
+     "estimateHeat": "jiterpreter-estimate-heat",
+     "countBailouts": "jiterpreter-count-bailouts",
+     "dumpTraces": "jiterpreter-dump-traces",
+-    "useConstants": "jiterpreter-use-constants",
+     "eliminateNullChecks": "jiterpreter-eliminate-null-checks",
+     "noExitBackwardBranches": "jiterpreter-backward-branches-enabled",
+     "directJitCalls": "jiterpreter-direct-jit-calls",
+diff --git a/src/mono/browser/runtime/jiterpreter-trace-generator.ts b/src/mono/browser/runtime/jiterpreter-trace-generator.ts
+index f9938164b5e112..842d89aebcbda7 100644
+--- a/src/mono/browser/runtime/jiterpreter-trace-generator.ts
++++ b/src/mono/browser/runtime/jiterpreter-trace-generator.ts
+@@ -1115,7 +1115,7 @@ export function generateWasmBody (
+                 // Stash obj->vtable->klass so we can do a fast has_parent check later
+                 if (canDoFastCheck)
+                     builder.local("src_ptr", WasmOpcode.tee_local);
+-                builder.i32_const(klass);
++                builder.ptr_const(klass);
+                 builder.appendU8(WasmOpcode.i32_eq);
+                 builder.block(WasmValtype.void, WasmOpcode.if_); // if A
+ 
+@@ -1206,7 +1206,7 @@ export function generateWasmBody (
+                     elementClassOffset = getMemberOffset(JiterpMember.ClassElementClass),
+                     destOffset = getArgU16(ip, 1),
+                     // Get the class's element class, which is what we will actually type-check against
+-                    elementClass = getU32_unaligned(klass + elementClassOffset);
++                    elementClass = getU32_unaligned(klass + elementClassOffset) >>> 0;
+ 
+                 if (!klass || !elementClass) {
+                     record_abort(builder.traceIndex, ip, traceName, "null-klass");
+@@ -1234,7 +1234,7 @@ export function generateWasmBody (
+                 builder.local("src_ptr", WasmOpcode.tee_local);
+                 builder.appendU8(WasmOpcode.i32_load);
+                 builder.appendMemarg(elementClassOffset, 0);
+-                builder.i32_const(elementClass);
++                builder.ptr_const(elementClass);
+                 builder.appendU8(WasmOpcode.i32_eq);
+ 
+                 // Check klass->rank == 0
+@@ -1285,7 +1285,7 @@ export function generateWasmBody (
+                 builder.block();
+                 append_ldloca(builder, getArgU16(ip, 1), 4);
+                 const vtable = get_imethod_data(frame, getArgU16(ip, 3));
+-                builder.i32_const(vtable);
++                builder.ptr_const(vtable);
+                 append_ldloc(builder, getArgU16(ip, 2), WasmOpcode.i32_load);
+                 builder.callImport("newarr");
+                 // If the newarr operation succeeded, continue, otherwise bailout
+@@ -1973,6 +1973,7 @@ function append_stloc_tail (builder: WasmBuilder, offset: number, opcodeOrPrefix
+         // This looks wrong but I assure you it's correct.
+         builder.appendULeb(simdOpcode);
+     }
++    offset = offset >>> 0;
+     const alignment = computeMemoryAlignment(offset, opcodeOrPrefix, simdOpcode);
+     builder.appendMemarg(offset, alignment);
+     invalidate_local(offset);
+@@ -2335,7 +2336,7 @@ function emit_fieldop (
+                     append_ldloc(builder, objectOffset, WasmOpcode.i32_load);
+                     append_ldloc(builder, objectOffset, WasmOpcode.i32_load);
+                     builder.i32_const(builder.traceIndex);
+-                    builder.i32_const(ip);
++                    builder.ptr_const(ip);
+                     builder.callImport("notnull");
+                 }
+             }
+diff --git a/src/mono/browser/runtime/jiterpreter.ts b/src/mono/browser/runtime/jiterpreter.ts
+index 7d4d2b374d2cc7..8138e7f9d53f2c 100644
+--- a/src/mono/browser/runtime/jiterpreter.ts
++++ b/src/mono/browser/runtime/jiterpreter.ts
+@@ -117,7 +117,7 @@ export class TraceInfo {
+     isVerbose: boolean;
+ 
+     constructor (ip: MintOpcodePtr, index: number, isVerbose: number) {
+-        this.ip = ip;
++        this.ip = ip as any >>> 0 as any;
+         this.index = index;
+         this.isVerbose = !!isVerbose;
+     }
+@@ -731,18 +731,12 @@ function generate_wasm (
+     traceIndex: number, methodFullName: string | undefined,
+     backwardBranchTable: Uint16Array | null, presetFunctionPointer: number
+ ): number {
+-    // Pre-allocate a decent number of constant slots - this adds fixed size bloat
+-    //  to the trace but will make the actual pointer constants in the trace smaller
+-    // If we run out of constant slots it will transparently fall back to i32_const
+-    // For System.Runtime.Tests we only run out of slots ~50 times in 9100 test cases
+-    const constantSlotCount = 8;
+-
+     let builder = traceBuilder;
+     if (!builder) {
+-        traceBuilder = builder = new WasmBuilder(constantSlotCount);
++        traceBuilder = builder = new WasmBuilder();
+         initialize_builder(builder);
+     } else
+-        builder.clear(constantSlotCount);
++        builder.clear();
+ 
+     mostRecentOptions = builder.options;
+ 
+@@ -1011,6 +1005,10 @@ export function mono_interp_tier_prepare_jiterpreter (
+     presetFunctionPointer: number
+ ): number {
+     mono_assert(ip, "expected instruction pointer");
++    ip = ip as any >>> 0 as any;
++    frame = frame as any >>> 0 as any;
++    method = method as any >>> 0 as any;
++    startOfBody = startOfBody as any >>> 0 as any;
+     if (!mostRecentOptions)
+         mostRecentOptions = getOptions();
+ 
+@@ -1084,6 +1082,9 @@ export function mono_interp_tier_prepare_jiterpreter (
+ export function mono_wasm_free_method_data (
+     method: MonoMethod, imethod: number, traceIndex: number
+ ) {
++    method = method as any >>> 0 as any;
++    imethod = imethod >>> 0;
++
+     if (runtimeHelpers.emscriptenBuildOptions.enableDevToolsProfiler) {
+         mono_wasm_profiler_free_method(method);
+     }
+diff --git a/src/mono/browser/runtime/marshal.ts b/src/mono/browser/runtime/marshal.ts
+index e2028be1a4f2fd..e369da6418e9cd 100644
+--- a/src/mono/browser/runtime/marshal.ts
++++ b/src/mono/browser/runtime/marshal.ts
+@@ -5,7 +5,7 @@ import WasmEnableThreads from "consts:wasmEnableThreads";
+ 
+ import { js_owned_gc_handle_symbol, teardown_managed_proxy } from "./gc-handles";
+ import { Module, loaderHelpers, mono_assert, runtimeHelpers } from "./globals";
+-import { getF32, getF64, getI16, getI32, getI64Big, getU16, getU32, getU8, setF32, setF64, setI16, setI32, setI64Big, setU16, setU32, setU8, localHeapViewF64, localHeapViewI32, localHeapViewU8, _zero_region, forceThreadMemoryViewRefresh, setB8, getB8 } from "./memory";
++import { getF32, getF64, getI16, getI32, getI64Big, getU16, getU32, getU8, setF32, setF64, setI16, setI32, setI64Big, setU16, setU32, setU8, localHeapViewF64, localHeapViewI32, localHeapViewU8, _zero_region, forceThreadMemoryViewRefresh, fixupPointer, setB8, getB8 } from "./memory";
+ import { mono_wasm_new_external_root } from "./roots";
+ import { GCHandle, JSHandle, MonoObject, MonoString, GCHandleNull, JSMarshalerArguments, JSFunctionSignature, JSMarshalerType, JSMarshalerArgument, MarshalerToJs, MarshalerToCs, WasmRoot, MarshalerType, PThreadPtr, PThreadPtrNull, VoidPtrNull } from "./types/internal";
+ import { TypedArray, VoidPtr } from "./types/emscripten";
+@@ -94,7 +94,7 @@ export function is_receiver_should_free (args: JSMarshalerArguments): boolean {
+ export function get_sync_done_semaphore_ptr (args: JSMarshalerArguments): VoidPtr {
+     if (!WasmEnableThreads) return VoidPtrNull;
+     mono_assert(args, "Null args");
+-    return getI32(<any>args + JSMarshalerArgumentOffsets.SyncDoneSemaphorePtr) as any;
++    return getU32(<any>args + JSMarshalerArgumentOffsets.SyncDoneSemaphorePtr) as any;
+ }
+ 
+ export function get_caller_native_tid (args: JSMarshalerArguments): PThreadPtr {
+@@ -468,6 +468,7 @@ export const enum MemoryViewType {
+ 
+ abstract class MemoryView implements IMemoryView {
+     protected constructor (public _pointer: VoidPtr, public _length: number, public _viewType: MemoryViewType) {
++        this._pointer = fixupPointer(_pointer, 0);
+     }
+ 
+     abstract dispose(): void;
+diff --git a/src/mono/browser/runtime/memory.ts b/src/mono/browser/runtime/memory.ts
+index 3497f05b8b99bc..06d2bbdda0cd7a 100644
+--- a/src/mono/browser/runtime/memory.ts
++++ b/src/mono/browser/runtime/memory.ts
+@@ -65,6 +65,7 @@ function assert_int_in_range (value: Number, min: Number, max: Number) {
+ }
+ 
+ export function _zero_region (byteOffset: VoidPtr, sizeBytes: number): void {
++    byteOffset = fixupPointer(byteOffset, 0);
+     localHeapViewU8().fill(0, <any>byteOffset, <any>byteOffset + sizeBytes);
+ }
+ 
+@@ -82,13 +83,13 @@ export function setB8 (offset: MemOffset, value: number | boolean): void {
+     if (typeof (value) === "number")
+         assert_int_in_range(value, 0, 1);
+     receiveWorkerHeapViews();
+-    Module.HEAPU8[<any>offset] = boolValue ? 1 : 0;
++    Module.HEAPU8[<any>offset >>> 0] = boolValue ? 1 : 0;
+ }
+ 
+ export function setU8 (offset: MemOffset, value: number): void {
+     assert_int_in_range(value, 0, 0xFF);
+     receiveWorkerHeapViews();
+-    Module.HEAPU8[<any>offset] = value;
++    Module.HEAPU8[<any>offset >>> 0] = value;
+ }
+ 
+ export function setU16 (offset: MemOffset, value: number): void {
+@@ -122,7 +123,7 @@ export function setU32 (offset: MemOffset, value: NumberOrPointer): void {
+ export function setI8 (offset: MemOffset, value: number): void {
+     assert_int_in_range(value, -0x80, 0x7F);
+     receiveWorkerHeapViews();
+-    Module.HEAP8[<any>offset] = value;
++    Module.HEAP8[<any>offset >>> 0] = value;
+ }
+ 
+ export function setI16 (offset: MemOffset, value: number): void {
+@@ -210,12 +211,12 @@ export function getB32 (offset: MemOffset): boolean {
+ 
+ export function getB8 (offset: MemOffset): boolean {
+     receiveWorkerHeapViews();
+-    return !!(Module.HEAPU8[<any>offset]);
++    return !!(Module.HEAPU8[<any>offset >>> 0]);
+ }
+ 
+ export function getU8 (offset: MemOffset): number {
+     receiveWorkerHeapViews();
+-    return Module.HEAPU8[<any>offset];
++    return Module.HEAPU8[<any>offset >>> 0];
+ }
+ 
+ export function getU16 (offset: MemOffset): number {
+@@ -256,7 +257,7 @@ export function getF64_unaligned (offset: MemOffset): number {
+ 
+ export function getI8 (offset: MemOffset): number {
+     receiveWorkerHeapViews();
+-    return Module.HEAP8[<any>offset];
++    return Module.HEAP8[<any>offset >>> 0];
+ }
+ 
+ export function getI16 (offset: MemOffset): number {
+diff --git a/src/mono/browser/runtime/roots.ts b/src/mono/browser/runtime/roots.ts
+index 0afee175f4ae5c..42ef2325600057 100644
+--- a/src/mono/browser/runtime/roots.ts
++++ b/src/mono/browser/runtime/roots.ts
+@@ -171,7 +171,7 @@ export class WasmRootBufferImpl implements WasmRootBuffer {
+     constructor (offset: VoidPtr, capacity: number, ownsAllocation: boolean, name?: string) {
+         const capacityBytes = capacity * 4;
+ 
+-        this.__offset = offset;
++        this.__offset = offset as any >>> 0 as any;
+         this.__offset32 = <number><any>offset >>> 2;
+         this.__count = capacity;
+         this.length = capacity;
+@@ -351,7 +351,7 @@ class WasmExternalRoot<T extends MonoObject> implements WasmRoot<T> {
+     }
+ 
+     _set_address (address: NativePointer | ManagedPointer): void {
+-        this.__external_address = <MonoObjectRef><any>address;
++        this.__external_address = address as any >>> 0 as any;
+         this.__external_address_32 = <number><any>address >>> 2;
+     }
+ 
+diff --git a/src/mono/browser/runtime/startup.ts b/src/mono/browser/runtime/startup.ts
+index 7fc2cefef1ca7d..3eaae69ec3fe74 100644
+--- a/src/mono/browser/runtime/startup.ts
++++ b/src/mono/browser/runtime/startup.ts
+@@ -27,7 +27,7 @@ import { populateEmscriptenPool, mono_wasm_init_threads } from "./pthreads";
+ import { currentWorkerThreadEvents, dotnetPthreadCreated, initWorkerThreadEvents, monoThreadInfo } from "./pthreads";
+ import { mono_wasm_pthread_ptr, update_thread_info } from "./pthreads";
+ import { jiterpreter_allocate_tables } from "./jiterpreter-support";
+-import { localHeapViewU8, malloc, setU32 } from "./memory";
++import { localHeapViewU8, malloc, setU32, fixupPointer } from "./memory";
+ import { assertNoProxies } from "./gc-handles";
+ import { runtimeList } from "./exports";
+ import { nativeAbort, nativeExit } from "./run";
+@@ -594,12 +594,12 @@ export function mono_wasm_asm_loaded (assembly_name: CharPtr, assembly_ptr: numb
+         return;
+     const heapU8 = localHeapViewU8();
+     const assembly_name_str = assembly_name !== CharPtrNull ? utf8ToString(assembly_name).concat(".dll") : "";
+-    const assembly_data = new Uint8Array(heapU8.buffer, assembly_ptr, assembly_len);
++    const assembly_data = new Uint8Array(heapU8.buffer, fixupPointer(assembly_ptr, 0), assembly_len);
+     const assembly_b64 = toBase64StringImpl(assembly_data);
+ 
+     let pdb_b64;
+     if (pdb_ptr) {
+-        const pdb_data = new Uint8Array(heapU8.buffer, pdb_ptr, pdb_len);
++        const pdb_data = new Uint8Array(heapU8.buffer, fixupPointer(pdb_ptr, 0), pdb_len);
+         pdb_b64 = toBase64StringImpl(pdb_data);
+     }
+ 
+diff --git a/src/mono/browser/runtime/strings.ts b/src/mono/browser/runtime/strings.ts
+index 2b52f82b0320b8..9ae9799c166a22 100644
+--- a/src/mono/browser/runtime/strings.ts
++++ b/src/mono/browser/runtime/strings.ts
+@@ -7,7 +7,7 @@ import { mono_wasm_new_root, mono_wasm_new_root_buffer } from "./roots";
+ import { MonoString, MonoStringNull, WasmRoot, WasmRootBuffer } from "./types/internal";
+ import { Module } from "./globals";
+ import cwraps from "./cwraps";
+-import { isSharedArrayBuffer, localHeapViewU8, getU32_local, setU16_local, localHeapViewU32, getU16_local, localHeapViewU16, _zero_region, malloc, free } from "./memory";
++import { isSharedArrayBuffer, localHeapViewU8, getU32_local, setU16_local, localHeapViewU32, getU16_local, localHeapViewU16, _zero_region, malloc, free, fixupPointer } from "./memory";
+ import { NativePointer, CharPtr, VoidPtr } from "./types/emscripten";
+ 
+ export const interned_js_string_table = new Map<string, MonoString>();
+@@ -65,10 +65,12 @@ export function utf8ToStringRelaxed (buffer: Uint8Array): string {
+ 
+ export function utf8ToString (ptr: CharPtr): string {
+     const heapU8 = localHeapViewU8();
+-    return utf8BufferToString(heapU8, ptr as any, heapU8.length - (ptr as any));
++    const fixedPtr = fixupPointer(ptr, 0);
++    return utf8BufferToString(heapU8, fixedPtr, heapU8.length - fixedPtr);
+ }
+ 
+ export function utf8BufferToString (heapOrArray: Uint8Array, idx: number, maxBytesToRead: number): string {
++    idx = fixupPointer(idx, 0);
+     const endIdx = idx + maxBytesToRead;
+     let endPtr = idx;
+     while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
+@@ -83,6 +85,8 @@ export function utf8BufferToString (heapOrArray: Uint8Array, idx: number, maxByt
+ }
+ 
+ export function utf16ToString (startPtr: number, endPtr: number): string {
++    startPtr = fixupPointer(startPtr, 0);
++    endPtr = fixupPointer(endPtr, 0);
+     if (_text_decoder_utf16) {
+         const subArray = viewOrCopy(localHeapViewU8(), startPtr as any, endPtr as any);
+         return _text_decoder_utf16.decode(subArray);
+@@ -277,8 +281,8 @@ export function viewOrCopy (view: Uint8Array, start: CharPtr, end: CharPtr): Uin
+     // this condition should be eliminated by rollup on non-threading builds
+     const needsCopy = isSharedArrayBuffer(view.buffer);
+     return needsCopy
+-        ? view.slice(<any>start, <any>end)
+-        : view.subarray(<any>start, <any>end);
++        ? view.slice(<any>start >>> 0, <any>end >>> 0)
++        : view.subarray(<any>start >>> 0, <any>end >>> 0);
+ }
+ 
+ // below is minimal legacy support for Blazor
+diff --git a/src/mono/browser/runtime/web-socket.ts b/src/mono/browser/runtime/web-socket.ts
+index fd18955f68dc01..1f29488d36a8f1 100644
+--- a/src/mono/browser/runtime/web-socket.ts
++++ b/src/mono/browser/runtime/web-socket.ts
+@@ -6,7 +6,7 @@ import WasmEnableThreads from "consts:wasmEnableThreads";
+ import { prevent_timer_throttling } from "./scheduling";
+ import { Queue } from "./queue";
+ import { ENVIRONMENT_IS_NODE, ENVIRONMENT_IS_SHELL, createPromiseController, loaderHelpers, mono_assert, Module } from "./globals";
+-import { setI32, localHeapViewU8, forceThreadMemoryViewRefresh } from "./memory";
++import { setI32, localHeapViewU8, forceThreadMemoryViewRefresh, fixupPointer } from "./memory";
+ import { VoidPtr } from "./types/emscripten";
+ import { PromiseController } from "./types/internal";
+ import { mono_log_warn } from "./logging";
+@@ -72,7 +72,7 @@ export function ws_wasm_create (uri: string, sub_protocols: string[] | null, rec
+     ws[wasm_ws_pending_open_promise] = open_promise_control;
+     ws[wasm_ws_pending_send_promises] = [];
+     ws[wasm_ws_pending_close_promises] = [];
+-    ws[wasm_ws_receive_status_ptr] = receive_status_ptr;
++    ws[wasm_ws_receive_status_ptr] = fixupPointer(receive_status_ptr, 0);
+     ws.binaryType = "arraybuffer";
+     const local_on_open = () => {
+         try {
+@@ -185,7 +185,7 @@ export function ws_wasm_send (ws: WebSocketExtension, buffer_ptr: VoidPtr, buffe
+         return resolvedPromise();
+     }
+ 
+-    const buffer_view = new Uint8Array(localHeapViewU8().buffer, <any>buffer_ptr, buffer_length);
++    const buffer_view = new Uint8Array(localHeapViewU8().buffer, fixupPointer(buffer_ptr, 0), buffer_length);
+     const whole_buffer = web_socket_send_buffering(ws, buffer_view, message_type, end_of_message);
+ 
+     if (!end_of_message || !whole_buffer) {
+@@ -232,7 +232,7 @@ export function ws_wasm_receive (ws: WebSocketExtension, buffer_ptr: VoidPtr, bu
+ 
+     const { promise, promise_control } = createPromiseController<void>();
+     const receive_promise_control = promise_control as ReceivePromiseControl;
+-    receive_promise_control.buffer_ptr = buffer_ptr;
++    receive_promise_control.buffer_ptr = fixupPointer(buffer_ptr, 0);
+     receive_promise_control.buffer_length = buffer_length;
+     receive_promise_queue.enqueue(receive_promise_control);
+ 
+@@ -402,7 +402,7 @@ function web_socket_receive_buffering (ws: WebSocketExtension, event_queue: Queu
+     const count = Math.min(buffer_length, event.data.length - event.offset);
+     if (count > 0) {
+         const sourceView = event.data.subarray(event.offset, event.offset + count);
+-        const bufferView = new Uint8Array(localHeapViewU8().buffer, <any>buffer_ptr, buffer_length);
++        const bufferView = new Uint8Array(localHeapViewU8().buffer, fixupPointer(buffer_ptr, 0), buffer_length);
+         bufferView.set(sourceView, 0);
+         event.offset += count;
+     }

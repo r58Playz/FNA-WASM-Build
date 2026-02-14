@@ -205,6 +205,7 @@ jobs:
         run: |
           cd liba/runtime/
           git apply ../../dotnet.patch
+          git apply ../../dotnet-jiterp.patch
           THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
           ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=$THREADS_FLAG -c Release
           7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
