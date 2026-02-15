@@ -25,6 +25,26 @@ index 4122d53f69c..72c82a1b9ad 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/mono/browser/runtime/pthreads/worker-thread.ts b/src/mono/browser/runtime/pthreads/worker-thread.ts
+index 75b249812d3..609ee797fa2 100644
+--- a/src/mono/browser/runtime/pthreads/worker-thread.ts
++++ b/src/mono/browser/runtime/pthreads/worker-thread.ts
+@@ -120,6 +120,7 @@ export function mono_wasm_pthread_on_pthread_created (): void {
+ /// Called in the worker thread (not main thread) from mono when a pthread becomes registered to the mono runtime.
+ export function mono_wasm_pthread_on_pthread_registered (pthread_id: PThreadPtr): void {
+     if (!WasmEnableThreads) return;
++    (pthread_id as any) >>>= 0;
+     try {
+         mono_assert(monoThreadInfo !== null && monoThreadInfo.pthreadId == pthread_id, "expected monoThreadInfo to be set already when registering");
+         monoThreadInfo.isRegistered = true;
+@@ -139,6 +140,7 @@ export function mono_wasm_pthread_on_pthread_registered (pthread_id: PThreadPtr)
+ /// Called in the worker thread (not main thread) from mono when a pthread becomes attached to the mono runtime.
+ export function mono_wasm_pthread_on_pthread_attached (pthread_id: PThreadPtr, thread_name: CharPtr, background_thread: number, threadpool_thread: number, external_eventloop: number, debugger_thread: number): void {
+     if (!WasmEnableThreads) return;
++    (pthread_id as any) >>>= 0;
+     try {
+         mono_assert(monoThreadInfo !== null && monoThreadInfo.pthreadId == pthread_id, "expected monoThreadInfo to be set already when attaching");
+ 
 diff --git a/src/mono/browser/runtime/startup.ts b/src/mono/browser/runtime/startup.ts
 index 0bfa9466553..9c71fe6cdae 100644
 --- a/src/mono/browser/runtime/startup.ts
@@ -179,35 +199,8 @@ index 182ede96e90..3187aafbe9b 100644
  		return res;
  	}
  }
-diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 266c658ba15..4fa7adc26e6 100644
---- a/src/mono/mono/mini/interp/transform.c
-+++ b/src/mono/mono/mini/interp/transform.c
-@@ -3630,7 +3630,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
- 	if (target_method == NULL) {
- 		if (calli) {
- 			CHECK_STACK_RET(td, 1, FALSE);
--			if (method->wrapper_type != MONO_WRAPPER_NONE)
-+			if (token == 0xF0F0F0F0)
-+				csignature = method->signature;
-+			else if (method->wrapper_type != MONO_WRAPPER_NONE)
- 				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
- 			else {
- 				csignature = mono_metadata_parse_signature_checked (image, token, error);
-@@ -10006,11 +10008,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
- 	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
- 	return_if_nok (error);
- 
--	if (!method_class_vt->initialized) {
--		mono_runtime_class_init_full (method_class_vt, error);
--		return_if_nok (error);
--	}
--
- 	MONO_PROFILER_RAISE (jit_begin, (method));
- 
- 	if (mono_method_signature_internal (method)->is_inflated)
 diff --git a/src/mono/mono/mini/interp/interp.h b/src/mono/mono/mini/interp/interp.h
-index a09111c49..0f3473ca8 100644
+index a09111c490b..0f3473ca8a7 100644
 --- a/src/mono/mono/mini/interp/interp.h
 +++ b/src/mono/mono/mini/interp/interp.h
 @@ -7,7 +7,7 @@
@@ -219,3 +212,30 @@ index a09111c49..0f3473ca8 100644
  #define INTERP_ICALL_TRAMP_FARGS 12
  #else
  #define INTERP_ICALL_TRAMP_IARGS 12
+diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
+index 57c9893a0c2..c801c05f3ca 100644
+--- a/src/mono/mono/mini/interp/transform.c
++++ b/src/mono/mono/mini/interp/transform.c
+@@ -3640,7 +3640,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
+ 	if (target_method == NULL) {
+ 		if (calli) {
+ 			CHECK_STACK_RET(td, 1, FALSE);
+-			if (method->wrapper_type != MONO_WRAPPER_NONE)
++			if (token == 0xF0F0F0F0)
++				csignature = method->signature;
++			else if (method->wrapper_type != MONO_WRAPPER_NONE)
+ 				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
+ 			else {
+ 				csignature = mono_metadata_parse_signature_checked (image, token, error);
+@@ -10020,11 +10022,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
+ 	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
+ 	return_if_nok (error);
+ 
+-	if (!method_class_vt->initialized) {
+-		mono_runtime_class_init_full (method_class_vt, error);
+-		return_if_nok (error);
+-	}
+-
+ 	MONO_PROFILER_RAISE (jit_begin, (method));
+ 
+ 	if (mono_method_signature_internal (method)->is_inflated)
