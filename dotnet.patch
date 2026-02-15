@@ -207,6 +207,19 @@ index 182ede96e90..3187aafbe9b 100644
  		return res;
  	}
  }
+diff --git a/src/mono/mono/metadata/threads.c b/src/mono/mono/metadata/threads.c
+index f641c393dd7..2a7b3f1fee3 100644
+--- a/src/mono/mono/metadata/threads.c
++++ b/src/mono/mono/metadata/threads.c
+@@ -3038,7 +3038,7 @@ dump_thread (MonoInternalThread *thread, ThreadDumpUserData *ud, FILE* output_fi
+ 		MonoStackFrameInfo *frame = &ud->frames [i];
+ 		MonoMethod *method = NULL;
+ 
+-		if (frame->type == FRAME_TYPE_MANAGED)
++		if (frame->type == FRAME_TYPE_MANAGED || frame->type == FRAME_TYPE_INTERP)
+ 			method = mono_jit_info_get_method (frame->ji);
+ 
+ 		if (method) {
 diff --git a/src/mono/mono/mini/interp/interp.h b/src/mono/mono/mini/interp/interp.h
 index a09111c490b..0f3473ca8a7 100644
 --- a/src/mono/mono/mini/interp/interp.h
