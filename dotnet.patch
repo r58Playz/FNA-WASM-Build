@@ -54,7 +54,7 @@ index 75b249812d3..6d8b34de6ac 100644
          mono_assert(pthread_id === monoThreadInfo.pthreadId, "expected pthread_id to match when un-registering");
          postRunWorker();
 diff --git a/src/mono/browser/runtime/startup.ts b/src/mono/browser/runtime/startup.ts
-index 0bfa9466553..9c71fe6cdae 100644
+index e8c7956350f..f7cd5750f1f 100644
 --- a/src/mono/browser/runtime/startup.ts
 +++ b/src/mono/browser/runtime/startup.ts
 @@ -368,7 +368,7 @@ async function postRunAsync (userpostRun: ((module:EmscriptenModule) => void)[])
@@ -67,7 +67,7 @@ index 0bfa9466553..9c71fe6cdae 100644
          // all user Module.postRun callbacks
          userpostRun.map(fn => fn(Module));
 diff --git a/src/mono/mono/metadata/class-setup-vtable.c b/src/mono/mono/metadata/class-setup-vtable.c
-index 144abac0e50..f9aca344996 100644
+index fd9be3b1527..62f64d43684 100644
 --- a/src/mono/mono/metadata/class-setup-vtable.c
 +++ b/src/mono/mono/metadata/class-setup-vtable.c
 @@ -776,6 +776,7 @@ mono_method_get_method_definition (MonoMethod *method)
@@ -79,10 +79,10 @@ index 144abac0e50..f9aca344996 100644
  	if (klass->image == mono_defaults.corlib)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
-index 5600f3dc75d..e10c5eb7713 100644
+index f023c6b3814..09be31ac3b2 100644
 --- a/src/mono/mono/metadata/class.c
 +++ b/src/mono/mono/metadata/class.c
-@@ -2564,7 +2564,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
+@@ -2566,7 +2566,7 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
  			if (strcmp (name, mono_field_get_name (field)) != 0)
  				continue;
  
@@ -91,7 +91,7 @@ index 5600f3dc75d..e10c5eb7713 100644
  				MonoClassField *gfield = mono_metadata_get_corresponding_field_from_generic_type_definition (field);
  				g_assert (gfield != NULL);
  				MonoType *field_type = gfield->type;
-@@ -6468,6 +6468,7 @@ can_access_member (MonoClass *access_klass, MonoClass *member_klass, MonoClass*
+@@ -6469,6 +6469,7 @@ can_access_member (MonoClass *access_klass, MonoClass *member_klass, MonoClass*
  gboolean
  mono_method_can_access_field (MonoMethod *method, MonoClassField *field)
  {
@@ -99,7 +99,7 @@ index 5600f3dc75d..e10c5eb7713 100644
  	/* FIXME: check all overlapping fields */
  	int can = can_access_member (method->klass, m_field_get_parent (field), NULL, mono_field_get_type_internal (field)->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK);
  	if (!can) {
-@@ -6503,6 +6504,7 @@ mono_method_get_method_definition (MonoMethod *method)
+@@ -6504,6 +6505,7 @@ mono_method_get_method_definition (MonoMethod *method)
  gboolean
  mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
  {
@@ -107,7 +107,7 @@ index 5600f3dc75d..e10c5eb7713 100644
  	method = mono_method_get_method_definition (method);
  	called = mono_method_get_method_definition (called);
  	return mono_method_can_access_method_full (method, called, NULL);
-@@ -6522,6 +6524,7 @@ mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
+@@ -6523,6 +6525,7 @@ mono_method_can_access_method (MonoMethod *method, MonoMethod *called)
  gboolean
  mono_method_can_access_method_full (MonoMethod *method, MonoMethod *called, MonoClass *context_klass)
  {
@@ -116,10 +116,10 @@ index 5600f3dc75d..e10c5eb7713 100644
  	if (method->wrapper_type != MONO_WRAPPER_NONE || called->wrapper_type != MONO_WRAPPER_NONE)
  		return TRUE;
 diff --git a/src/mono/mono/metadata/icall.c b/src/mono/mono/metadata/icall.c
-index 182ede96e90..3187aafbe9b 100644
+index a46a2fab4eb..5aa64060067 100644
 --- a/src/mono/mono/metadata/icall.c
 +++ b/src/mono/mono/metadata/icall.c
-@@ -5614,15 +5614,81 @@ ves_icall_System_Reflection_RuntimeModule_InternalGetTypes (MonoImage *image, Mo
+@@ -5618,15 +5618,81 @@ ves_icall_System_Reflection_RuntimeModule_InternalGetTypes (MonoImage *image, Mo
  		MonoArrayHandle res = mono_module_get_types (image, exceptions, FALSE, error);
  		return_val_if_nok (error, MONO_HANDLE_CAST(MonoArray, NULL_HANDLE));
  
@@ -220,6 +220,70 @@ index f641c393dd7..2a7b3f1fee3 100644
  			method = mono_jit_info_get_method (frame->ji);
  
  		if (method) {
+diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
+index 0a12875dcce..85e07d1ef2b 100644
+--- a/src/mono/mono/mini/interp/interp.c
++++ b/src/mono/mono/mini/interp/interp.c
+@@ -2390,6 +2390,59 @@ interp_entry (InterpEntryData *data)
+ 			return;
+ 		}
+ 	} else {
++		if (context->has_resume_state) {
++			// Print exception details before asserting
++			g_printerr ("\n========================================\n");
++			g_printerr ("[INTERP] ERROR: Unhandled exception in interp_entry - has_resume_state is set\n");
++			g_printerr ("[INTERP] Method: %s.%s\n", 
++				method->klass->name_space ? method->klass->name_space : "<no namespace>",
++				method->name ? method->name : "<no name>");
++			
++			if (context->exc_gchandle) {
++				MonoObject *exc = mono_gchandle_get_target_internal (context->exc_gchandle);
++				if (exc) {
++					MonoClass *exc_class = mono_object_class (exc);
++					const char *exc_namespace = m_class_get_name_space (exc_class);
++					const char *exc_name = m_class_get_name (exc_class);
++					g_printerr ("[INTERP] Exception type: %s.%s\n",
++						exc_namespace ? exc_namespace : "<no namespace>",
++						exc_name ? exc_name : "<no name>");
++					
++					// Try to get the exception message
++					ERROR_DECL (error);
++					MonoString *msg_str = NULL;
++					MonoObject *other_exc = NULL;
++					msg_str = mono_object_try_to_string (exc, &other_exc, error);
++					if (msg_str && !other_exc && is_ok (error)) {
++						char *msg = mono_string_to_utf8_checked_internal (msg_str, error);
++						if (msg && is_ok (error)) {
++							g_printerr ("[INTERP] Exception message: %s\n", msg);
++							g_free (msg);
++						}
++					}
++					if (!is_ok (error))
++						mono_error_cleanup (error);
++					
++					// Get managed backtrace
++					char *backtrace = mono_exception_get_managed_backtrace ((MonoException*)exc);
++					if (backtrace) {
++						g_printerr ("[INTERP] Managed stack trace:\n%s\n", backtrace);
++						g_free (backtrace);
++					} else {
++						g_printerr ("[INTERP] No managed stack trace available\n");
++					}
++					
++					// Also call the standard exception printer
++					g_printerr ("[INTERP] Full exception details:\n");
++					mono_print_unhandled_exception_internal (exc);
++				} else {
++					g_printerr ("[INTERP] Exception GC handle is set but target is NULL\n");
++				}
++			} else {
++				g_printerr ("[INTERP] has_resume_state is set but exc_gchandle is NULL\n");
++			}
++			g_printerr ("========================================\n\n");
++		}
+ 		g_assert (!context->has_resume_state);
+ 	}
+ 
 diff --git a/src/mono/mono/mini/interp/interp.h b/src/mono/mono/mini/interp/interp.h
 index a09111c490b..0f3473ca8a7 100644
 --- a/src/mono/mono/mini/interp/interp.h
@@ -234,10 +298,10 @@ index a09111c490b..0f3473ca8a7 100644
  #else
  #define INTERP_ICALL_TRAMP_IARGS 12
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 57c9893a0c2..c801c05f3ca 100644
+index ac69cd2d8f8..6dbc383a086 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -3640,7 +3640,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
+@@ -3642,7 +3642,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
  	if (target_method == NULL) {
  		if (calli) {
  			CHECK_STACK_RET(td, 1, FALSE);
@@ -248,7 +312,7 @@ index 57c9893a0c2..c801c05f3ca 100644
  				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
  			else {
  				csignature = mono_metadata_parse_signature_checked (image, token, error);
-@@ -10020,11 +10022,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
+@@ -10022,11 +10024,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
  	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
  	return_if_nok (error);
  
