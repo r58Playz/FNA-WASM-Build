@@ -1,0 +1,579 @@
+diff --git a/src/mono/mono/metadata/class-init.c b/src/mono/mono/metadata/class-init.c
+index 348883da0ad..1ab7410538c 100644
+--- a/src/mono/mono/metadata/class-init.c
++++ b/src/mono/mono/metadata/class-init.c
+@@ -346,17 +346,18 @@ mono_class_setup_fields (MonoClass *klass)
+ 			mono_field_resolve_type (field, error);
+ 			if (!is_ok (error)) {
+ 				/*mono_field_resolve_type already failed class*/
++				g_warning ("Could not resolve field type for %s:%s: %s (continuing anyway)", mono_type_get_full_name(klass), field->name, mono_error_get_message (error));
+ 				mono_error_cleanup (error);
+-				break;
+ 			}
+-			if (!field->type)
+-				g_error ("could not resolve %s:%s\n", mono_type_get_full_name(klass), field->name);
+-			g_assert (field->type);
++			if (!field->type) {
++				g_warning ("Field type is NULL after resolve for %s:%s, skipping", mono_type_get_full_name(klass), field->name);
++				continue;
++			}
+ 		}
+ 
+ 		if (!mono_type_get_underlying_type (field->type)) {
+-			mono_class_set_type_load_failure (klass, "Field '%s' is an enum type with a bad underlying type", field->name);
+-			break;
++			g_warning ("Field '%s' is an enum type with a bad underlying type (continuing anyway)", field->name);
++			continue;
+ 		}
+ 
+ 		if (mono_field_is_deleted (field))
+@@ -398,10 +399,9 @@ mono_class_setup_fields (MonoClass *klass)
+ 			char *class_name = mono_type_get_full_name (klass);
+ 			char *type_name = mono_type_full_name (field->type);
+ 
+-			mono_class_set_type_load_failure (klass, "Invalid type %s for instance field %s:%s", type_name, class_name, field->name);
++			g_warning ("Field type has exceptions: Invalid type %s for instance field %s:%s (continuing anyway)", type_name, class_name, field->name);
+ 			g_free (class_name);
+ 			g_free (type_name);
+-			break;
+ 		}
+ 		if (m_type_is_byref (field->type)) {
+ 			if (!m_class_is_byreflike (klass)) {
+@@ -414,7 +414,8 @@ mono_class_setup_fields (MonoClass *klass)
+ 		/* The def_value of fields is compute lazily during vtable creation */
+ 	}
+ 
+-	if (!mono_class_has_failure (klass)) {
++	/* Proceed with layout even if class has failures - we want partial field setup */
++	{
+ 		mono_loader_lock ();
+ 		mono_class_layout_fields (klass, instance_size, packing_size, real_size, FALSE);
+ 		mono_loader_unlock ();
+@@ -2009,6 +2010,8 @@ validate_struct_fields_overlaps (guint8 *layout_check, int layout_size, MonoClas
+ 
+ 		if (!field)
+ 			continue;
++		if (!field->type)
++			continue;
+ 		if (mono_field_is_deleted (field))
+ 			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+@@ -2139,6 +2142,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 	if (klass->enumtype) {
+ 		for (i = 0; i < top; i++) {
+ 			field = &klass->fields [i];
++			if (!field->type)
++				continue;
+ 			if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC)) {
+ 				klass->cast_class = klass->element_class = mono_class_from_mono_type_internal (field->type);
+ 				break;
+@@ -2180,6 +2185,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 	for (i = 0; i < top; i++) {
+ 		field = &klass->fields [i];
+ 
++		if (!field->type)
++			continue;
+ 		if (mono_field_is_deleted (field))
+ 			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+@@ -2228,6 +2235,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 
+ 		field = &klass->fields [i];
+ 
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC)) {
+ 			ftype = mono_type_get_underlying_type (field->type);
+ 			ftype = mono_type_get_basic_type_from_generic (ftype);
+@@ -2274,6 +2283,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 
+ 				field = &klass->fields [i];
+ 
++				if (!field->type)
++					continue;
+ 				if (mono_field_is_deleted (field))
+ 					continue;
+ 				if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+@@ -2370,6 +2381,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 			 * There must be info about all the fields in a type if it
+ 			 * uses explicit layout.
+ 			 */
++			if (!field->type)
++				continue;
+ 			if (mono_field_is_deleted (field))
+ 				continue;
+ 			if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+@@ -2467,7 +2480,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 			g_print ("%d %d %d %d\n", klass->packing_size, packing_size, klass->min_align, min_align);
+ 			for (i = 0; i < top; ++i) {
+ 				field = &klass->fields [i];
+-				if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++				if (field->type && !(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 					printf ("  %s %d %d %d\n", klass->fields [i].name, klass->fields [i].offset, field_offsets [i], fields_has_references [i]);
+ 			}
+ 		}
+@@ -2483,7 +2496,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 	klass->any_field_has_auto_layout = any_field_has_auto_layout;
+ 	for (i = 0; i < top; ++i) {
+ 		field = &klass->fields [i];
+-		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++		if (field->type && !(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 			klass->fields [i].offset = field_offsets [i];
+ 	}
+ 
+@@ -2506,6 +2519,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 
+ 		field = &klass->fields [i];
+ 
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC) || field->type->attrs & FIELD_ATTRIBUTE_LITERAL)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -2515,8 +2530,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 		   it's a reference type we can get the size without
+ 		   recursing */
+ 		if (mono_type_has_exceptions (field->type)) {
+-			mono_class_set_type_load_failure (klass, "Field '%s' has an invalid type.", field->name);
+-			break;
++			g_warning ("Static field '%s' has an invalid type (skipping layout for this field).", field->name);
++			continue;
+ 		}
+ 
+ 		has_static_fields = TRUE;
+@@ -2524,8 +2539,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 		size = mono_type_size (field->type, &align);
+ 		/* Check again in case initializing the field's type caused a failure */
+ 		if (mono_type_has_exceptions (field->type)) {
+-			mono_class_set_type_load_failure (klass, "Field '%s' has an invalid type.", field->name);
+-			break;
++			g_warning ("Static field '%s' has an invalid type after size init (skipping layout for this field).", field->name);
++			continue;
+ 		}
+ 
+ 		field_offsets [i] = class_size;
+@@ -2546,7 +2561,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 
+ 		field = &klass->fields [i];
+ 
+-		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC) {
++		if (field->type && field->type->attrs & FIELD_ATTRIBUTE_STATIC) {
+ 			ftype = mono_type_get_underlying_type (field->type);
+ 			ftype = mono_type_get_basic_type_from_generic (ftype);
+ 			if (type_has_references (klass, ftype))
+@@ -2577,7 +2592,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 
+ 			while ((field = mono_class_get_fields_internal (p, &iter))) {
+ 				guint32 field_idx = first_field_idx + (field - p->fields);
+-				if (MONO_TYPE_IS_REFERENCE (field->type) && mono_assembly_is_weak_field (p->image, field_idx + 1)) {
++				if (field->type && MONO_TYPE_IS_REFERENCE (field->type) && mono_assembly_is_weak_field (p->image, field_idx + 1)) {
+ 					has_weak_fields = TRUE;
+ 					mono_trace_message (MONO_TRACE_TYPE, "Field %s:%s at offset %x is weak.", m_field_get_parent (field)->name, field->name, field->offset);
+ 				}
+@@ -2598,6 +2613,8 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 	for (i = 0; i < top; i++) {
+ 		field = &klass->fields [i];
+ 
++		if (!field->type)
++			continue;
+ 		if (mono_field_is_deleted (field))
+ 			continue;
+ 		if ((field->type->attrs & FIELD_ATTRIBUTE_LITERAL))
+@@ -2642,7 +2659,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
+ 	for (i = 0; i < top; ++i) {
+ 		field = &klass->fields [i];
+ 
+-		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
++		if (field->type && field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			field->offset = field_offsets [i];
+ 	}
+ 	mono_memory_barrier ();
+diff --git a/src/mono/mono/metadata/class-internals.h b/src/mono/mono/metadata/class-internals.h
+index e439368454d..21dd07577de 100644
+--- a/src/mono/mono/metadata/class-internals.h
++++ b/src/mono/mono/metadata/class-internals.h
+@@ -164,7 +164,7 @@ struct _MonoClassField {
+ };
+ 
+ /* a field is ignored if it's named "_Deleted" and it has the specialname and rtspecialname flags set */
+-#define mono_field_is_deleted(field) (((field)->type->attrs & (FIELD_ATTRIBUTE_SPECIAL_NAME | FIELD_ATTRIBUTE_RT_SPECIAL_NAME)) \
++#define mono_field_is_deleted(field) ((field)->type && ((field)->type->attrs & (FIELD_ATTRIBUTE_SPECIAL_NAME | FIELD_ATTRIBUTE_RT_SPECIAL_NAME)) \
+ 				      && (strcmp (mono_field_get_name (field), "_Deleted") == 0))
+ 
+ /* a field is ignored if it's named "_Deleted" and it has the specialname and rtspecialname flags set */
+diff --git a/src/mono/mono/metadata/class-setup-vtable.c b/src/mono/mono/metadata/class-setup-vtable.c
+index f9aca344996..62f64d43684 100644
+--- a/src/mono/mono/metadata/class-setup-vtable.c
++++ b/src/mono/mono/metadata/class-setup-vtable.c
+@@ -1960,10 +1960,16 @@ mono_class_setup_vtable_general (MonoClass *klass, MonoMethod **overrides, int o
+ 						vtable [im_slot] = im;
+ 					}
+ 				}
+-			} else {
+-				g_assert (vtable [im_slot] == override_im);
++		} else {
++			if (vtable [im_slot] != override_im) {
++				g_warning ("vtable slot %d mismatch for interface method '%s': expected override '%s' but got '%s' (continuing anyway)",
++					im_slot, mono_method_full_name (im, 1),
++					mono_method_full_name (override_im, 1),
++					vtable [im_slot] ? mono_method_full_name (vtable [im_slot], 1) : "NULL");
++				vtable [im_slot] = override_im;
+ 			}
+ 		}
++		}
+ 	}
+ 
+ 	// If the class is not abstract, check that all its interface slots are full.
+diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
+index e10c5eb7713..09be31ac3b2 100644
+--- a/src/mono/mono/metadata/class.c
++++ b/src/mono/mono/metadata/class.c
+@@ -2555,12 +2555,14 @@ mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoTyp
+ 
+ 	mono_class_setup_fields (klass);
+ 	if (mono_class_has_failure (klass))
+-		return NULL;
++		g_warning ("mono_class_get_field_from_name_full: class %s.%s has failure, attempting field lookup anyway for field '%s'", m_class_get_name_space (klass), m_class_get_name (klass), name);
+ 
+ 	while (klass) {
+ 		gpointer iter = NULL;
+ 		MonoClassField *field;
+ 		while ((field = mono_class_get_fields_internal (klass, &iter))) {
++			if (!field->type)
++				continue;
+ 			if (strcmp (name, mono_field_get_name (field)) != 0)
+ 				continue;
+ 
+@@ -2649,7 +2651,7 @@ mono_class_get_field_default_value (MonoClassField *field, MonoTypeEnum *def_typ
+ 	MonoClass *klass = m_field_get_parent (field);
+ 	MonoFieldDefaultValue *def_values;
+ 
+-	g_assert (field->type->attrs & FIELD_ATTRIBUTE_HAS_DEFAULT);
++	g_assert (field->type && field->type->attrs & FIELD_ATTRIBUTE_HAS_DEFAULT);
+ 
+ 	def_values = mono_class_get_field_def_values (klass);
+ 	if (!def_values) {
+@@ -5298,8 +5300,7 @@ mono_class_get_fields_internal (MonoClass *klass, gpointer *iter)
+ 	MonoImage *image = m_class_get_image (klass);
+ 	if (!*iter) {
+ 		mono_class_setup_fields (klass);
+-		if (mono_class_has_failure (klass))
+-			return NULL;
++		/* Continue even if class has failure - fields may still be partially usable */
+ 		/* start from the first */
+ 		if (mono_class_get_field_count (klass)) {
+ 			MonoClassField *klass_fields = m_class_get_fields (klass);
+@@ -5753,7 +5754,7 @@ mono_field_get_rva (MonoClassField *field, int swizzle)
+ 	MonoClass *klass = m_field_get_parent (field);
+ 	MonoFieldDefaultValue *def_values;
+ 
+-	g_assert (field->type->attrs & FIELD_ATTRIBUTE_HAS_FIELD_RVA);
++	g_assert (field->type && field->type->attrs & FIELD_ATTRIBUTE_HAS_FIELD_RVA);
+ 
+ 	/* metadata-update: added static fields with initializers don't seem to get here */
+ 	g_assert (!m_field_is_from_update (field));
+@@ -5826,11 +5827,11 @@ mono_field_get_rva (MonoClassField *field, int swizzle)
+ const char *
+ mono_field_get_data (MonoClassField *field)
+ {
+-	if (field->type->attrs & FIELD_ATTRIBUTE_HAS_DEFAULT) {
++	if (field->type && field->type->attrs & FIELD_ATTRIBUTE_HAS_DEFAULT) {
+ 		MonoTypeEnum def_type;
+ 
+ 		return mono_class_get_field_default_value (field, &def_type);
+-	} else if (field->type->attrs & FIELD_ATTRIBUTE_HAS_FIELD_RVA) {
++	} else if (field->type && field->type->attrs & FIELD_ATTRIBUTE_HAS_FIELD_RVA) {
+ 		return mono_field_get_rva (field, 1);
+ 	} else {
+ 		return NULL;
+@@ -6586,11 +6587,11 @@ mono_method_can_access_field_full (MonoMethod *method, MonoClassField *field, Mo
+ 	MonoClass *access_class = method->klass;
+ 	MonoClass *member_class = m_field_get_parent (field);
+ 	/* FIXME: check all overlapping fields */
+-	int can = can_access_member (access_class, member_class, context_klass, field->type->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK);
++	int can = can_access_member (access_class, member_class, context_klass, field->type ? field->type->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK : FIELD_ATTRIBUTE_PUBLIC);
+ 	if (!can) {
+ 		MonoClass *nested = m_class_get_nested_in (access_class);
+ 		while (nested) {
+-			can = can_access_member (nested, member_class, context_klass, field->type->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK);
++			can = can_access_member (nested, member_class, context_klass, field->type ? field->type->attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK : FIELD_ATTRIBUTE_PUBLIC);
+ 			if (can)
+ 				break;
+ 			nested = m_class_get_nested_in (nested);
+@@ -6688,6 +6689,8 @@ mono_class_is_valid_enum (MonoClass *klass)
+ 		return FALSE;
+ 
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC)) {
+ 			if (found_base_field)
+ 				return FALSE;
+@@ -6735,14 +6738,14 @@ mono_field_resolve_type (MonoClassField *field, MonoError *error)
+ 		MonoType *gtype = mono_field_get_type_checked (gfield, error);
+ 		if (!is_ok (error)) {
+ 			char *full_name = mono_type_get_full_name (gtd);
+-			mono_class_set_type_load_failure (klass, "Could not load generic type of field '%s:%s' (%d) due to: %s", full_name, gfield->name, field_idx, mono_error_get_message (error));
++			g_warning ("Could not load generic type of field '%s:%s' (%d) due to: %s", full_name, gfield->name, field_idx, mono_error_get_message (error));
+ 			g_free (full_name);
+ 		}
+ 
+ 		ftype = mono_class_inflate_generic_type_no_copy (image, gtype, mono_class_get_context (klass), error);
+ 		if (!is_ok (error)) {
+ 			char *full_name = mono_type_get_full_name (klass);
+-			mono_class_set_type_load_failure (klass, "Could not load instantiated type of field '%s:%s' (%d) due to: %s", full_name, field->name, field_idx, mono_error_get_message (error));
++			g_warning ("Could not load instantiated type of field '%s:%s' (%d) due to: %s", full_name, field->name, field_idx, mono_error_get_message (error));
+ 			g_free (full_name);
+ 		}
+ 	} else {
+@@ -6779,7 +6782,7 @@ mono_field_resolve_type (MonoClassField *field, MonoError *error)
+ 		ftype = mono_metadata_parse_type_checked (image, container, cols [MONO_FIELD_FLAGS], FALSE, sig + 1, &sig, error);
+ 		if (!ftype) {
+ 			char *full_name = mono_type_get_full_name (klass);
+-			mono_class_set_type_load_failure (klass, "Could not load type of field '%s:%s' (%d) due to: %s", full_name, field->name, field_idx, mono_error_get_message (error));
++			g_warning ("Could not load type of field '%s:%s' (%d) due to: %s", full_name, field->name, field_idx, mono_error_get_message (error));
+ 			g_free (full_name);
+ 		}
+ 	}
+diff --git a/src/mono/mono/metadata/icall.c b/src/mono/mono/metadata/icall.c
+index 3187aafbe9b..5aa64060067 100644
+--- a/src/mono/mono/metadata/icall.c
++++ b/src/mono/mono/metadata/icall.c
+@@ -1266,6 +1266,8 @@ ves_icall_System_ValueType_InternalGetHashCode (MonoObjectHandle this_obj, MonoA
+ 	 */
+ 	iter = NULL;
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -1347,6 +1349,8 @@ ves_icall_System_ValueType_Equals (MonoObjectHandle this_obj, MonoObjectHandle t
+ 	 */
+ 	iter = NULL;
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -3798,7 +3802,7 @@ get_enum_field (MonoArrayHandle names, MonoArrayHandle values, int base_type, Mo
+ 	const char *p;
+ 	MonoTypeEnum def_type;
+ 
+-	if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++	if (!field->type || !(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 		goto leave;
+ 	if (strcmp ("value__", mono_field_get_name (field)) == 0)
+ 		goto leave;
+diff --git a/src/mono/mono/metadata/marshal-lightweight.c b/src/mono/mono/metadata/marshal-lightweight.c
+index 54e8db81929..31c79bfa742 100644
+--- a/src/mono/mono/metadata/marshal-lightweight.c
++++ b/src/mono/mono/metadata/marshal-lightweight.c
+@@ -2306,7 +2306,7 @@ emit_unsafe_accessor_field_wrapper (MonoMethodBuilder *mb, gboolean inflate_gene
+ 	}
+ 
+ 	MonoClassField *target_field = mono_class_get_field_from_name_full (target_class, member_name, NULL);
+-	if (target_field == NULL || !mono_metadata_type_equal_full (target_field->type, m_class_get_byval_arg (mono_class_from_mono_type_internal (ret_type)), MONO_TYPE_EQ_FLAGS_SIG_ONLY | MONO_TYPE_EQ_FLAG_IGNORE_CMODS)) {
++	if (target_field == NULL || !target_field->type || !mono_metadata_type_equal_full (target_field->type, m_class_get_byval_arg (mono_class_from_mono_type_internal (ret_type)), MONO_TYPE_EQ_FLAGS_SIG_ONLY | MONO_TYPE_EQ_FLAG_IGNORE_CMODS)) {
+ 		mono_mb_emit_exception_full (mb, "System", "MissingFieldException",
+ 			g_strdup_printf("No '%s' in '%s'. Or the type of '%s' doesn't match", member_name, m_class_get_name (target_class), member_name));
+ 		return;
+diff --git a/src/mono/mono/metadata/marshal-shared.c b/src/mono/mono/metadata/marshal-shared.c
+index 7a6beef71a7..3b7b083956d 100644
+--- a/src/mono/mono/metadata/marshal-shared.c
++++ b/src/mono/mono/metadata/marshal-shared.c
+@@ -335,6 +335,8 @@ mono_marshal_shared_offset_of_first_nonstatic_field (MonoClass *klass)
+ 	gpointer iter = NULL;
+ 	MonoClassField *field;
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC) && !mono_field_is_deleted (field)) {
+ 			/*
+ 			 * metadata-update: adding fields to existing structs isn't supported.  In
+diff --git a/src/mono/mono/metadata/marshal.c b/src/mono/mono/metadata/marshal.c
+index 9a14986eda8..8d40b52e6ff 100644
+--- a/src/mono/mono/metadata/marshal.c
++++ b/src/mono/mono/metadata/marshal.c
+@@ -5759,6 +5759,8 @@ ves_icall_System_Runtime_InteropServices_Marshal_OffsetOf (MonoReflectionTypeHan
+ 		int i = 0;
+ 		gpointer iter = NULL;
+ 		while ((field = mono_class_get_fields_internal (klass, &iter))) {
++			if (!field->type)
++				continue;
+ 			if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 				continue;
+ 			if (!strcmp (fname, mono_field_get_name (field))) {
+@@ -5984,6 +5986,8 @@ mono_marshal_load_type_info (MonoClass* klass)
+ 
+ 	iter = NULL;
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -6014,6 +6018,8 @@ mono_marshal_load_type_info (MonoClass* klass)
+ 		int size;
+ 		guint32 align;
+ 
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 
+@@ -6866,6 +6872,8 @@ static void record_inlinearray_struct_physical_lowering (guint8* lowered_bytes,
+ 
+ 	// Get the first instance field and record its physical lowering N times
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -6893,6 +6901,8 @@ static void record_struct_physical_lowering (guint8* lowered_bytes, MonoClass* k
+ 	MonoClassField* field;
+ 	int type_offset = MONO_ABI_SIZEOF (MonoObject);
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+diff --git a/src/mono/mono/metadata/object.c b/src/mono/mono/metadata/object.c
+index 69f625d67b9..94b86c74d72 100644
+--- a/src/mono/mono/metadata/object.c
++++ b/src/mono/mono/metadata/object.c
+@@ -885,6 +885,10 @@ compute_class_bitmap (MonoClass *klass, gsize *bitmap, int size, int offset, int
+ 			if (m_field_is_from_update (field))
+ 				continue;
+ 
++			/* Skip fields with unresolved types */
++			if (!field->type)
++				continue;
++
+ 			if (static_fields) {
+ 				if (!(field->type->attrs & (FIELD_ATTRIBUTE_STATIC | FIELD_ATTRIBUTE_HAS_FIELD_RVA)))
+ 					continue;
+@@ -1024,6 +1028,8 @@ compute_class_non_ref_bitmap (MonoClass *klass, gsize *bitmap, int size, int off
+ 		while ((field = mono_class_get_fields_internal (p, &iter))) {
+ 			MonoType *type;
+ 
++			if (!field->type)
++				continue;
+ 			if (field->type->attrs & (FIELD_ATTRIBUTE_STATIC | FIELD_ATTRIBUTE_HAS_FIELD_RVA))
+ 				continue;
+ 			/* FIXME: should not happen, flag as type load error */
+@@ -1220,7 +1226,7 @@ mono_class_compute_gc_descriptor (MonoClass *klass)
+ 					MonoImage *p_image = m_class_get_image (p);
+ 					while ((field = mono_class_get_fields_internal (p, &iter))) {
+ 						guint32 field_idx = first_field_idx + (field - p_fields);
+-						if (MONO_TYPE_IS_REFERENCE (field->type) && mono_assembly_is_weak_field (p_image, field_idx + 1)) {
++						if (field->type && MONO_TYPE_IS_REFERENCE (field->type) && mono_assembly_is_weak_field (p_image, field_idx + 1)) {
+ 							int pos = field->offset / sizeof (gpointer);
+ 							if (pos + 1 > weak_bitmap_nbits)
+ 								weak_bitmap_nbits = pos + 1;
+@@ -1947,6 +1953,8 @@ allocate_collectible_static_fields (MonoVTable *vt, MonoMemoryManager *mem_manag
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
+ 		MonoType *type;
+ 
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & (FIELD_ATTRIBUTE_STATIC | FIELD_ATTRIBUTE_HAS_FIELD_RVA)))
+ 			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_LITERAL)
+@@ -2248,6 +2256,8 @@ mono_class_create_runtime_vtable (MonoClass *klass, MonoError *error)
+ 		/* metadata-update: added fields are stored external to the object, and don't contribute to the bitmap */
+ 		if (m_field_is_from_update (field))
+ 			continue;
++		if (!field->type)
++			continue;
+ 		if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 			continue;
+ 		if (mono_field_is_deleted (field))
+@@ -2423,7 +2433,7 @@ mono_class_field_is_special_static (MonoClassField *field)
+ {
+ 	MONO_REQ_GC_NEUTRAL_MODE
+ 
+-	if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++	if (!field->type || !(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 		return FALSE;
+ 	if (mono_field_is_deleted (field))
+ 		return FALSE;
+@@ -2445,7 +2455,7 @@ mono_class_field_get_special_static_type (MonoClassField *field)
+ {
+ 	MONO_REQ_GC_NEUTRAL_MODE
+ 
+-	if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++	if (!field->type || !(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 		return SPECIAL_STATIC_NONE;
+ 	if (mono_field_is_deleted (field))
+ 		return SPECIAL_STATIC_NONE;
+@@ -2979,7 +2989,7 @@ mono_field_set_value_internal (MonoObject *obj, MonoClassField *field, void *val
+ {
+ 	void *dest;
+ 
+-	if ((field->type->attrs & FIELD_ATTRIBUTE_STATIC))
++	if (!field->type || (field->type->attrs & FIELD_ATTRIBUTE_STATIC))
+ 		return;
+ 
+ 	if (G_UNLIKELY (m_field_is_from_update (field))) {
+@@ -3016,7 +3026,7 @@ mono_field_static_set_value_internal (MonoVTable *vt, MonoClassField *field, voi
+ {
+ 	void *dest;
+ 
+-	if ((field->type->attrs & FIELD_ATTRIBUTE_STATIC) == 0)
++	if (!field->type || (field->type->attrs & FIELD_ATTRIBUTE_STATIC) == 0)
+ 		return;
+ 	/* you cant set a constant! */
+ 	if ((field->type->attrs & FIELD_ATTRIBUTE_LITERAL))
+@@ -3075,7 +3085,7 @@ mono_field_get_addr (MonoObject *obj, MonoVTable *vt, MonoClassField *field)
+ {
+ 	MONO_REQ_GC_UNSAFE_MODE;
+ 
+-	if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
++	if (field->type && field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 		return mono_static_field_get_addr (vt, field);
+ 	else {
+ 		if (G_LIKELY (!m_field_is_from_update (field)))
+@@ -3103,7 +3113,7 @@ mono_static_field_get_addr (MonoVTable *vt, MonoClassField *field)
+ 
+ 	guint8 *src;
+ 
+-	g_assert (field->type->attrs & FIELD_ATTRIBUTE_STATIC);
++	g_assert (field->type && field->type->attrs & FIELD_ATTRIBUTE_STATIC);
+ 	if (field->offset == -1) {
+ 		if (G_UNLIKELY (m_field_is_from_update (field))) {
+ 			return mono_metadata_update_get_static_field_addr (field);
+@@ -3160,7 +3170,7 @@ mono_field_get_value_internal (MonoObject *obj, MonoClassField *field, void *val
+ 
+ 	g_assert (obj);
+ 
+-	g_return_if_fail (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC));
++	g_return_if_fail (field->type && !(field->type->attrs & FIELD_ATTRIBUTE_STATIC));
+ 
+ 	if (G_UNLIKELY (m_field_is_from_update (field))) {
+ 		ERROR_DECL (error);
+@@ -3478,7 +3488,7 @@ mono_field_static_get_value_for_thread (MonoInternalThread *thread, MonoVTable *
+ 
+ 	error_init (error);
+ 
+-	g_return_if_fail (field->type->attrs & FIELD_ATTRIBUTE_STATIC);
++	g_return_if_fail (field->type && field->type->attrs & FIELD_ATTRIBUTE_STATIC);
+ 
+ 	if (field->type->attrs & FIELD_ATTRIBUTE_LITERAL) {
+ 		get_default_field_value (field, value, string_handle, error);
+diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
+index c801c05f3ca..6dbc383a086 100644
+--- a/src/mono/mono/mini/interp/transform.c
++++ b/src/mono/mono/mini/interp/transform.c
+@@ -2849,6 +2849,8 @@ is_scalar_vtype (MonoType *type)
+ 	int nfields = 0;
+ 	field = NULL;
+ 	while ((field = mono_class_get_fields_internal (klass, &iter))) {
++		if (!field->type)
++			continue;
+ 		if (field->type->attrs & FIELD_ATTRIBUTE_STATIC)
+ 			continue;
+ 		nfields ++;
