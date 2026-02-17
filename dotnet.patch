@@ -25,6 +25,23 @@ index 4122d53f69c..72c82a1b9ad 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/mono/browser/runtime/jiterpreter.ts b/src/mono/browser/runtime/jiterpreter.ts
+index d427e4eb907..259732f29dc 100644
+--- a/src/mono/browser/runtime/jiterpreter.ts
++++ b/src/mono/browser/runtime/jiterpreter.ts
+@@ -876,6 +876,12 @@ function generate_wasm (
+         // Get the exported trace function
+         const fn = traceInstance.exports[traceName];
+ 
++        if (!fn) {
++            mono_log_warn(`Jiterpreter didn't find ${traceName} in exports of traceInstance`);
++            rejected = true;
++            return 0;
++        }
++
+         rejected = false;
+ 
+         let idx: number;
 diff --git a/src/mono/browser/runtime/pthreads/worker-thread.ts b/src/mono/browser/runtime/pthreads/worker-thread.ts
 index 75b249812d3..6d8b34de6ac 100644
 --- a/src/mono/browser/runtime/pthreads/worker-thread.ts
