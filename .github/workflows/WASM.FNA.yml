@@ -1,8 +1,8 @@
 name: WASM Build (FNA)
 
 env:
-  SDL_VERSION: release-3.2.26
-  SDL2COMPAT_VERSION: release-2.32.58
+  SDL_VERSION: release-3.4.2
+  SDL2COMPAT_VERSION: release-2.32.64
   FNA3D_VERSION: 25.11
   FAUDIO_VERSION: 25.11
   OPENSSL_VERSION: openssl-3.4
@@ -50,7 +50,6 @@ jobs:
         run: |
           git clone -b ${{ env.SDL_VERSION }} https://github.com/libsdl-org/SDL
           cd SDL
-          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
           mkdir emscripten-build
           cd emscripten-build
           PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
@@ -73,7 +72,6 @@ jobs:
           bash ../symbolrenamer.sh ../SDL/emscripten-build/libSDL3.a ./SDL3.renamed.h
           git clone -b ${{ env.SDL_VERSION }} https://github.com/libsdl-org/SDL
           cd SDL
-          git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL.patch
           git apply /home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL3-SDL2.patch
           mkdir emscripten-build
           cd emscripten-build
