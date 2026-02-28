@@ -1,5 +1,49 @@
+diff --git a/src/joystick/emscripten/SDL_sysjoystick.c b/src/joystick/emscripten/SDL_sysjoystick.c
+index 42f12b033..2692134d5 100644
+--- a/src/joystick/emscripten/SDL_sysjoystick.c
++++ b/src/joystick/emscripten/SDL_sysjoystick.c
+@@ -35,7 +35,7 @@ static SDL_joylist_item *SDL_joylist = NULL;
+ static SDL_joylist_item *SDL_joylist_tail = NULL;
+ static int numjoysticks = 0;
+ 
+-EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickVendor, (int device_index), {
+     // Let's assume that if we're calling these function then the gamepad object definitely exists
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+@@ -55,7 +55,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
+     return 0;
+ });
+ 
+-EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickProduct, (int device_index), {
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+     // Chrome, Edge, Opera: Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 09cc)
+@@ -74,7 +74,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
+     return 0;
+ });
+ 
+-EM_JS(int, SDL_IsEmscriptenJoystickXInput, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_IsEmscriptenJoystickXInput, (int device_index), {
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+     // Chrome, Edge, Opera: Xbox 360 Controller (XInput STANDARD GAMEPAD)
+@@ -104,9 +104,9 @@ static EM_BOOL Emscripten_JoyStickConnected(int eventType, const EmscriptenGamep
+     SDL_zerop(item);
+     item->index = gamepadEvent->index;
+ 
+-    vendor = SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
+-    product = SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
+-    is_xinput = SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
++    vendor = SDL3_renamed_SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
++    product = SDL3_renamed_SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
++    is_xinput = SDL3_renamed_SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
+ 
+     // Use a generic VID/PID representing an XInput controller
+     if (!vendor && !product && is_xinput) {
 diff --git a/src/stdlib/SDL_memcpy.c b/src/stdlib/SDL_memcpy.c
-index 315edf023..65c5dd99d 100644
+index eb2c16044..30a5396b8 100644
 --- a/src/stdlib/SDL_memcpy.c
 +++ b/src/stdlib/SDL_memcpy.c
 @@ -20,13 +20,7 @@
@@ -18,7 +62,7 @@ index 315edf023..65c5dd99d 100644
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
 diff --git a/src/stdlib/SDL_memmove.c b/src/stdlib/SDL_memmove.c
-index 4e0d26c4b..b444c8311 100644
+index 5df0af356..fe15eac78 100644
 --- a/src/stdlib/SDL_memmove.c
 +++ b/src/stdlib/SDL_memmove.c
 @@ -20,13 +20,7 @@
@@ -37,7 +81,7 @@ index 4e0d26c4b..b444c8311 100644
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
 diff --git a/src/stdlib/SDL_memset.c b/src/stdlib/SDL_memset.c
-index 324f91787..574aff6d1 100644
+index d12df67cf..188eec9e5 100644
 --- a/src/stdlib/SDL_memset.c
 +++ b/src/stdlib/SDL_memset.c
 @@ -20,13 +20,7 @@
@@ -55,3 +99,38 @@ index 324f91787..574aff6d1 100644
  void *SDL_memset(SDL_OUT_BYTECAP(len) void *dst, int c, size_t len)
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
+diff --git a/src/video/emscripten/SDL_emscriptenevents.c b/src/video/emscripten/SDL_emscriptenevents.c
+index 6326d6967..d7a2a51ce 100644
+--- a/src/video/emscripten/SDL_emscriptenevents.c
++++ b/src/video/emscripten/SDL_emscriptenevents.c
+@@ -973,7 +973,7 @@ static void Emscripten_prep_pointer_event_callbacks(void)
+                     return 0;
+                 }
+ 
+-                var ptr = _SDL_malloc($0);
++                var ptr = _SDL3_renamed_SDL_malloc($0);
+                 if (ptr != 0) {
+                     var idx = SDL3.CPtrToHeap32Index(ptr);
+                     HEAP32[idx++] = ptrtype;
+@@ -1148,7 +1148,7 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+ 
+             var makeDropEventCStruct = function(event) {
+                 var ptr = 0;
+-                ptr = _SDL_malloc($2);
++                ptr = _SDL3_renamed_SDL_malloc($2);
+                 if (ptr != 0) {
+                     var idx = ptr >> 2;
+                     var rect = target.getBoundingClientRect();
+diff --git a/src/video/emscripten/SDL_emscriptenmouse.c b/src/video/emscripten/SDL_emscriptenmouse.c
+index c2f4b817a..ac16d8375 100644
+--- a/src/video/emscripten/SDL_emscriptenmouse.c
++++ b/src/video/emscripten/SDL_emscriptenmouse.c
+@@ -106,7 +106,7 @@ static SDL_Cursor *Emscripten_CreateCursor(SDL_Surface *surface, int hot_x, int
+             ? "url(" + canvas.toDataURL() + "), auto"
+             : "url(" + canvas.toDataURL() + ") " + hot_x + " " + hot_y + ", auto";
+ 
+-        var urlBuf = _SDL_malloc(url.length + 1);
++        var urlBuf = _SDL3_renamed_SDL_malloc(url.length + 1);
+         stringToUTF8(url, urlBuf, url.length + 1);
+ 
+         return urlBuf;
