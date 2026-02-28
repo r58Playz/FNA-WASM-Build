@@ -1,5 +1,110 @@
+diff --git a/src/camera/emscripten/SDL_camera_emscripten.c b/src/camera/emscripten/SDL_camera_emscripten.c
+index 85ff587d3..274183a20 100644
+--- a/src/camera/emscripten/SDL_camera_emscripten.c
++++ b/src/camera/emscripten/SDL_camera_emscripten.c
+@@ -22,10 +22,10 @@
+ 
+ #ifdef SDL_CAMERA_DRIVER_EMSCRIPTEN
+ 
+-#include "../SDL_syscamera.h"
+-#include "../SDL_camera_c.h"
+ #include "../../video/SDL_pixels_c.h"
+ #include "../../video/SDL_surface_c.h"
++#include "../SDL_camera_c.h"
++#include "../SDL_syscamera.h"
+ 
+ #include <emscripten/emscripten.h>
+ 
+@@ -130,8 +130,8 @@ static bool EMSCRIPTENCAMERA_OpenDevice(SDL_Camera *device, const SDL_CameraSpec
+         const h = $2;
+         const framerate_numerator = $3;
+         const framerate_denominator = $4;
+-        const outcome = Module._SDLEmscriptenCameraPermissionOutcome;
+-        const iterate = Module._SDLEmscriptenThreadIterate;
++        const outcome = Module._SDL3_renamed_SDLEmscriptenCameraPermissionOutcome;
++        const iterate = Module._SDL3_renamed_SDLEmscriptenThreadIterate;
+ 
+         const constraints = {};
+         if ((w <= 0) || (h <= 0)) {
+@@ -271,4 +271,3 @@ CameraBootStrap EMSCRIPTENCAMERA_bootstrap = {
+ /* *INDENT-ON* */ // clang-format on
+ 
+ #endif // SDL_CAMERA_DRIVER_EMSCRIPTEN
+-
+diff --git a/src/joystick/emscripten/SDL_sysjoystick.c b/src/joystick/emscripten/SDL_sysjoystick.c
+index 42f12b033..2692134d5 100644
+--- a/src/joystick/emscripten/SDL_sysjoystick.c
++++ b/src/joystick/emscripten/SDL_sysjoystick.c
+@@ -35,7 +35,7 @@ static SDL_joylist_item *SDL_joylist = NULL;
+ static SDL_joylist_item *SDL_joylist_tail = NULL;
+ static int numjoysticks = 0;
+ 
+-EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickVendor, (int device_index), {
+     // Let's assume that if we're calling these function then the gamepad object definitely exists
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+@@ -55,7 +55,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
+     return 0;
+ });
+ 
+-EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickProduct, (int device_index), {
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+     // Chrome, Edge, Opera: Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 09cc)
+@@ -74,7 +74,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
+     return 0;
+ });
+ 
+-EM_JS(int, SDL_IsEmscriptenJoystickXInput, (int device_index), {
++EM_JS(int, SDL3_renamed_SDL_IsEmscriptenJoystickXInput, (int device_index), {
+     let gamepad = navigator['getGamepads']()[device_index];
+ 
+     // Chrome, Edge, Opera: Xbox 360 Controller (XInput STANDARD GAMEPAD)
+@@ -104,9 +104,9 @@ static EM_BOOL Emscripten_JoyStickConnected(int eventType, const EmscriptenGamep
+     SDL_zerop(item);
+     item->index = gamepadEvent->index;
+ 
+-    vendor = SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
+-    product = SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
+-    is_xinput = SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
++    vendor = SDL3_renamed_SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
++    product = SDL3_renamed_SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
++    is_xinput = SDL3_renamed_SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
+ 
+     // Use a generic VID/PID representing an XInput controller
+     if (!vendor && !product && is_xinput) {
+diff --git a/src/main/emscripten/SDL_sysmain_runapp.c b/src/main/emscripten/SDL_sysmain_runapp.c
+index 0564240ac..559536bb9 100644
+--- a/src/main/emscripten/SDL_sysmain_runapp.c
++++ b/src/main/emscripten/SDL_sysmain_runapp.c
+@@ -28,7 +28,7 @@
+ 
+ EM_JS_DEPS(sdlrunapp, "$dynCall,$stringToNewUTF8");
+ 
+-int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void * reserved)
++int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void *reserved)
+ {
+     (void)reserved;
+ 
+@@ -46,11 +46,10 @@ int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void * reserv
+                     //console.log("Setting SDL env var '" + key + "' to '" + value + "' ...");
+                     dynCall('iiii', $0, [ckey, cvalue, 1]);
+                 }
+-                _Emscripten_force_free(ckey);  // these must use free(), not SDL_free()!
+-                _Emscripten_force_free(cvalue);
++                _SDL3_renamed_Emscripten_force_free(ckey);  // these must use free(), not SDL_free()!
++                _SDL3_renamed_Emscripten_force_free(cvalue);
+             }
+-        }
+-    }, SDL_setenv_unsafe);
++        } }, SDL_setenv_unsafe);
+ 
+     return SDL_CallMainFunction(argc, argv, mainFunction);
+ }
 diff --git a/src/stdlib/SDL_memcpy.c b/src/stdlib/SDL_memcpy.c
-index 315edf023..65c5dd99d 100644
+index eb2c16044..30a5396b8 100644
 --- a/src/stdlib/SDL_memcpy.c
 +++ b/src/stdlib/SDL_memcpy.c
 @@ -20,13 +20,7 @@
@@ -18,7 +123,7 @@ index 315edf023..65c5dd99d 100644
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
 diff --git a/src/stdlib/SDL_memmove.c b/src/stdlib/SDL_memmove.c
-index 4e0d26c4b..b444c8311 100644
+index 5df0af356..fe15eac78 100644
 --- a/src/stdlib/SDL_memmove.c
 +++ b/src/stdlib/SDL_memmove.c
 @@ -20,13 +20,7 @@
@@ -37,7 +142,7 @@ index 4e0d26c4b..b444c8311 100644
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
 diff --git a/src/stdlib/SDL_memset.c b/src/stdlib/SDL_memset.c
-index 324f91787..574aff6d1 100644
+index d12df67cf..188eec9e5 100644
 --- a/src/stdlib/SDL_memset.c
 +++ b/src/stdlib/SDL_memset.c
 @@ -20,13 +20,7 @@
@@ -55,3 +160,666 @@ index 324f91787..574aff6d1 100644
  void *SDL_memset(SDL_OUT_BYTECAP(len) void *dst, int c, size_t len)
  {
  #if defined(__GNUC__) && (defined(HAVE_LIBC) && HAVE_LIBC)
+diff --git a/src/video/emscripten/SDL_emscriptenevents.c b/src/video/emscripten/SDL_emscriptenevents.c
+index 6326d6967..942325c10 100644
+--- a/src/video/emscripten/SDL_emscriptenevents.c
++++ b/src/video/emscripten/SDL_emscriptenevents.c
+@@ -23,8 +23,8 @@
+ 
+ #ifdef SDL_VIDEO_DRIVER_EMSCRIPTEN
+ 
+-#include <emscripten/html5.h>
+ #include <emscripten/dom_pk_codes.h>
++#include <emscripten/html5.h>
+ 
+ #include "../../events/SDL_dropevents_c.h"
+ #include "../../events/SDL_events_c.h"
+@@ -279,8 +279,7 @@ static SDL_Window *Emscripten_GetFocusedWindow(SDL_VideoDevice *device)
+             {
+                 // querySelector throws if not a valid selector
+             }
+-            return false;
+-        }, wdata->canvas_id);
++            return false; }, wdata->canvas_id);
+ 
+         if (focused) {
+             break;
+@@ -504,7 +503,7 @@ static EM_BOOL Emscripten_HandleFullscreenChangeGlobal(int eventType, const Emsc
+             canvas_id++;
+         }
+         if (SDL_strcmp(fullscreenChangeEvent->id, canvas_id) == 0) {
+-            break;  // this is the window.
++            break; // this is the window.
+         }
+     }
+ 
+@@ -530,13 +529,13 @@ static EM_BOOL Emscripten_HandleResize(int eventType, const EmscriptenUiEvent *u
+     }
+ 
+     const bool fill_document = (Emscripten_fill_document_window == window_data->window);
+-    const bool fullscreen = (window_data->window->flags & SDL_WINDOW_FULLSCREEN) != 0;  // fullscreen windows can resize on Emscripten, and the canvas should fill it.
++    const bool fullscreen = (window_data->window->flags & SDL_WINDOW_FULLSCREEN) != 0; // fullscreen windows can resize on Emscripten, and the canvas should fill it.
+     const bool resizable = (window_data->window->flags & SDL_WINDOW_RESIZABLE) != 0;
+     if (fill_document || fullscreen || resizable) {
+         double w, h;
+         if (fill_document || fullscreen) {
+-            w = (double) uiEvent->windowInnerWidth;
+-            h = (double) uiEvent->windowInnerHeight;
++            w = (double)uiEvent->windowInnerWidth;
++            h = (double)uiEvent->windowInnerHeight;
+         } else {
+             SDL_assert(window_data->window->flags & SDL_WINDOW_RESIZABLE);
+             w = window_data->window->w;
+@@ -614,29 +613,34 @@ static EM_BOOL Emscripten_HandleOrientationChange(int eventType, const Emscripte
+ {
+     SDL_DisplayOrientation orientation;
+     switch (orientationChangeEvent->orientationIndex) {
+-        #define CHECK_ORIENTATION(emsdk, sdl) case EMSCRIPTEN_ORIENTATION_##emsdk: orientation = SDL_ORIENTATION_##sdl; break
++#define CHECK_ORIENTATION(emsdk, sdl)        \
++    case EMSCRIPTEN_ORIENTATION_##emsdk:     \
++        orientation = SDL_ORIENTATION_##sdl; \
++        break
+         CHECK_ORIENTATION(LANDSCAPE_PRIMARY, LANDSCAPE);
+         CHECK_ORIENTATION(LANDSCAPE_SECONDARY, LANDSCAPE_FLIPPED);
+         CHECK_ORIENTATION(PORTRAIT_PRIMARY, PORTRAIT);
+         CHECK_ORIENTATION(PORTRAIT_SECONDARY, PORTRAIT_FLIPPED);
+-        #undef CHECK_ORIENTATION
+-        default: orientation = SDL_ORIENTATION_UNKNOWN; break;
++#undef CHECK_ORIENTATION
++    default:
++        orientation = SDL_ORIENTATION_UNKNOWN;
++        break;
+     }
+ 
+-    SDL_WindowData *window_data = (SDL_WindowData *) userData;
++    SDL_WindowData *window_data = (SDL_WindowData *)userData;
+     SDL_SendDisplayEvent(SDL_GetVideoDisplayForWindow(window_data->window), SDL_EVENT_DISPLAY_ORIENTATION, orientation, 0);
+ 
+     // fake a UI event so we can tell the app the canvas might have resized.
+     EmscriptenUiEvent uiEvent;
+     SDL_zero(uiEvent);
+-    uiEvent.documentBodyClientWidth = MAIN_THREAD_EM_ASM_INT( { return document.body.clientWidth; } );
+-    uiEvent.documentBodyClientHeight = MAIN_THREAD_EM_ASM_INT( { return document.body.clientHeight; } );
+-    uiEvent.windowInnerWidth = MAIN_THREAD_EM_ASM_INT( { return window.innerWidth; } );
+-    uiEvent.windowInnerHeight = MAIN_THREAD_EM_ASM_INT( { return window.innerHeight; } );
+-    uiEvent.windowOuterWidth = MAIN_THREAD_EM_ASM_INT( { return window.outerWidth; } );
+-    uiEvent.windowOuterHeight = MAIN_THREAD_EM_ASM_INT( { return window.outerHeight; } );
+-    uiEvent.scrollTop = MAIN_THREAD_EM_ASM_INT( { return window.pageXOffset; } );
+-    uiEvent.scrollLeft = MAIN_THREAD_EM_ASM_INT( { return window.pageYOffset; } );
++    uiEvent.documentBodyClientWidth = MAIN_THREAD_EM_ASM_INT({ return document.body.clientWidth; });
++    uiEvent.documentBodyClientHeight = MAIN_THREAD_EM_ASM_INT({ return document.body.clientHeight; });
++    uiEvent.windowInnerWidth = MAIN_THREAD_EM_ASM_INT({ return window.innerWidth; });
++    uiEvent.windowInnerHeight = MAIN_THREAD_EM_ASM_INT({ return window.innerHeight; });
++    uiEvent.windowOuterWidth = MAIN_THREAD_EM_ASM_INT({ return window.outerWidth; });
++    uiEvent.windowOuterHeight = MAIN_THREAD_EM_ASM_INT({ return window.outerHeight; });
++    uiEvent.scrollTop = MAIN_THREAD_EM_ASM_INT({ return window.pageXOffset; });
++    uiEvent.scrollLeft = MAIN_THREAD_EM_ASM_INT({ return window.pageYOffset; });
+     Emscripten_HandleResize(EMSCRIPTEN_EVENT_RESIZE, &uiEvent, userData);
+ 
+     return 0;
+@@ -645,7 +649,7 @@ static EM_BOOL Emscripten_HandleOrientationChange(int eventType, const Emscripte
+ // IF YOU CHANGE THIS STRUCTURE, YOU NEED TO UPDATE THE JAVASCRIPT THAT FILLS IT IN: SDL3.makePointerEventCStruct, below.
+ #define PTRTYPE_MOUSE 1
+ #define PTRTYPE_TOUCH 2
+-#define PTRTYPE_PEN 3
++#define PTRTYPE_PEN   3
+ typedef struct Emscripten_PointerEvent
+ {
+     int pointer_type;
+@@ -669,14 +673,20 @@ static void Emscripten_HandleMouseButton(SDL_WindowData *window_data, const Emsc
+     Uint8 sdl_button;
+     bool down = false;
+     switch (event->button) {
+-        #define CHECK_MOUSE_BUTTON(jsbutton, downflag, sdlbutton) case jsbutton: sdl_button = SDL_BUTTON_##sdlbutton; down = (event->down != 0) || ((event->buttons & downflag) != 0); break
++#define CHECK_MOUSE_BUTTON(jsbutton, downflag, sdlbutton)                \
++    case jsbutton:                                                       \
++        sdl_button = SDL_BUTTON_##sdlbutton;                             \
++        down = (event->down != 0) || ((event->buttons & downflag) != 0); \
++        break
+         CHECK_MOUSE_BUTTON(0, 1, LEFT);
+         CHECK_MOUSE_BUTTON(1, 4, MIDDLE);
+         CHECK_MOUSE_BUTTON(2, 2, RIGHT);
+         CHECK_MOUSE_BUTTON(3, 8, X1);
+         CHECK_MOUSE_BUTTON(4, 16, X2);
+-        #undef CHECK_MOUSE_BUTTON
+-        default: sdl_button = 0; break;
++#undef CHECK_MOUSE_BUTTON
++    default:
++        sdl_button = 0;
++        break;
+     }
+ 
+     if (sdl_button) {
+@@ -760,7 +770,7 @@ static void Emscripten_UpdateTouchFromEvent(SDL_WindowData *window_data, const E
+     }
+ 
+     const bool down = (event->buttons & 1) != 0;
+-    if (event->button == 0) {  // touch is starting or ending if this is zero (-1 means "no change").
++    if (event->button == 0) { // touch is starting or ending if this is zero (-1 means "no change").
+         if (down) {
+             SDL_SendTouch(0, deviceId, id, window_data->window, SDL_EVENT_FINGER_DOWN, x, y, 1.0f);
+         }
+@@ -768,7 +778,7 @@ static void Emscripten_UpdateTouchFromEvent(SDL_WindowData *window_data, const E
+ 
+     SDL_SendTouchMotion(0, deviceId, id, window_data->window, x, y, 1.0f);
+ 
+-    if (event->button == 0) {  // touch is starting or ending if this is zero (-1 means "no change").
++    if (event->button == 0) { // touch is starting or ending if this is zero (-1 means "no change").
+         if (!down) {
+             SDL_SendTouch(0, deviceId, id, window_data->window, SDL_EVENT_FINGER_UP, x, y, 1.0f);
+         }
+@@ -778,7 +788,7 @@ static void Emscripten_UpdateTouchFromEvent(SDL_WindowData *window_data, const E
+ static void Emscripten_UpdatePenFromEvent(SDL_WindowData *window_data, const Emscripten_PointerEvent *event)
+ {
+     SDL_assert(event->pointer_type == PTRTYPE_PEN);
+-    const SDL_PenID pen = SDL_FindPenByHandle((void *) (size_t) 1);   // something > 0 for the single pen handle.
++    const SDL_PenID pen = SDL_FindPenByHandle((void *)(size_t)1); // something > 0 for the single pen handle.
+     if (pen) {
+         // rescale (in case canvas is being scaled)
+         double client_w, client_h;
+@@ -798,10 +808,10 @@ static void Emscripten_UpdatePenFromEvent(SDL_WindowData *window_data, const Ems
+ 
+         SDL_SendPenMotion(0, pen, window_data->window, mx, my);
+ 
+-        if (event->button == 0) {  // pen touch
++        if (event->button == 0) { // pen touch
+             bool down = ((event->buttons & 1) != 0);
+             SDL_SendPenTouch(0, pen, window_data->window, false, down);
+-        } else if (event->button == 5) {  // eraser touch...? Not sure if this is right...
++        } else if (event->button == 5) { // eraser touch...? Not sure if this is right...
+             bool down = ((event->buttons & 32) != 0);
+             SDL_SendPenTouch(0, pen, window_data->window, true, down);
+         } else if (event->button == 1) {
+@@ -852,9 +862,9 @@ static void Emscripten_HandleMouseFocus(SDL_WindowData *window_data, const Emscr
+     }
+ 
+     if (isenter && window_data->mouse_focus_loss_pending) {
+-        window_data->mouse_focus_loss_pending = false;  // just drop the state, but don't send the enter event.
++        window_data->mouse_focus_loss_pending = false; // just drop the state, but don't send the enter event.
+     } else if (!isenter && (window_data->window->flags & SDL_WINDOW_MOUSE_CAPTURE)) {
+-        window_data->mouse_focus_loss_pending = true;  // waiting on a mouse button to let go before we send the mouse focus update.
++        window_data->mouse_focus_loss_pending = true; // waiting on a mouse button to let go before we send the mouse focus update.
+     } else {
+         SDL_SetMouseFocus(isenter ? window_data->window : NULL);
+     }
+@@ -867,7 +877,7 @@ static void Emscripten_HandlePenEnter(SDL_WindowData *window_data, const Emscrip
+     // event->pointerid is one continuous interaction; it doesn't necessarily track a specific tool over time, like the same finger's ID changed on each new touch event.
+     // as such, we only expose a single pen, and when the touch ends, we say it lost proximity instead of the calling SDL_RemovePenDevice().
+ 
+-    SDL_PenID pen = SDL_FindPenByHandle((void *) (size_t) 1);  // something > 0 for the single pen handle.
++    SDL_PenID pen = SDL_FindPenByHandle((void *)(size_t)1); // something > 0 for the single pen handle.
+     if (pen) {
+         SDL_SendPenProximity(0, pen, window_data->window, true, true);
+     } else {
+@@ -878,7 +888,7 @@ static void Emscripten_HandlePenEnter(SDL_WindowData *window_data, const Emscrip
+         peninfo.max_tilt = 90.0f;
+         peninfo.num_buttons = 2;
+         peninfo.subtype = SDL_PEN_TYPE_PEN;
+-        SDL_AddPenDevice(0, NULL, window_data->window, &peninfo, (void *) (size_t) 1, true);
++        SDL_AddPenDevice(0, NULL, window_data->window, &peninfo, (void *)(size_t)1, true);
+     }
+ 
+     Emscripten_UpdatePenFromEvent(window_data, event);
+@@ -900,9 +910,9 @@ EMSCRIPTEN_KEEPALIVE void Emscripten_HandlePointerEnter(SDL_WindowData *window_d
+ 
+ static void Emscripten_HandlePenLeave(SDL_WindowData *window_data, const Emscripten_PointerEvent *event)
+ {
+-    const SDL_PenID pen = SDL_FindPenByHandle((void *) (size_t) 1);   // something > 0 for the single pen handle.
++    const SDL_PenID pen = SDL_FindPenByHandle((void *)(size_t)1); // something > 0 for the single pen handle.
+     if (pen) {
+-        Emscripten_UpdatePointerFromEvent(window_data, event);  // last data updates?
++        Emscripten_UpdatePointerFromEvent(window_data, event); // last data updates?
+         SDL_SendPenProximity(0, pen, window_data->window, false, false);
+     }
+ }
+@@ -973,7 +983,7 @@ static void Emscripten_prep_pointer_event_callbacks(void)
+                     return 0;
+                 }
+ 
+-                var ptr = _SDL_malloc($0);
++                var ptr = _SDL3_renamed_SDL_malloc($0);
+                 if (ptr != 0) {
+                     var idx = SDL3.CPtrToHeap32Index(ptr);
+                     HEAP32[idx++] = ptrtype;
+@@ -995,8 +1005,7 @@ static void Emscripten_prep_pointer_event_callbacks(void)
+                 }
+                 return ptr;
+             };
+-        }
+-    }, sizeof (Emscripten_PointerEvent));
++        } }, sizeof(Emscripten_PointerEvent));
+ }
+ 
+ static void Emscripten_set_pointer_event_callbacks(SDL_WindowData *data)
+@@ -1013,8 +1022,8 @@ static void Emscripten_set_pointer_event_callbacks(SDL_WindowData *data)
+                 var d = SDL3.makePointerEventCStruct(rect.left, rect.top, event);
+                 if (d != 0)
+                 {
+-                    _Emscripten_HandlePointerEnter(SDL3.JSVarToCPtr(data), d);
+-                    _SDL_free(d);
++                    _SDL3_renamed_Emscripten_HandlePointerEnter(SDL3.JSVarToCPtr(data), d);
++                    _SDL3_renamed_SDL_free(d);
+                 }
+             };
+             target.sdlEventHandlerPointerLeave = function(event) {
+@@ -1022,8 +1031,8 @@ static void Emscripten_set_pointer_event_callbacks(SDL_WindowData *data)
+                 var d = SDL3.makePointerEventCStruct(rect.left, rect.top, event);
+                 if (d != 0)
+                 {
+-                    _Emscripten_HandlePointerLeave(SDL3.JSVarToCPtr(data), d);
+-                    _SDL_free(d);
++                    _SDL3_renamed_Emscripten_HandlePointerLeave(SDL3.JSVarToCPtr(data), d);
++                    _SDL3_renamed_SDL_free(d);
+                 }
+             };
+             target.sdlEventHandlerPointerGeneric = function(event) {
+@@ -1031,8 +1040,8 @@ static void Emscripten_set_pointer_event_callbacks(SDL_WindowData *data)
+                 var d = SDL3.makePointerEventCStruct(rect.left, rect.top, event);
+                 if (d != 0)
+                 {
+-                    _Emscripten_HandlePointerGeneric(SDL3.JSVarToCPtr(data), d);
+-                    _SDL_free(d);
++                    _SDL3_renamed_Emscripten_HandlePointerGeneric(SDL3.JSVarToCPtr(data), d);
++                    _SDL3_renamed_SDL_free(d);
+                 }
+             };
+ 
+@@ -1043,8 +1052,7 @@ static void Emscripten_set_pointer_event_callbacks(SDL_WindowData *data)
+             target.addEventListener("pointerdown", target.sdlEventHandlerPointerGeneric);
+             target.addEventListener("pointermove", target.sdlEventHandlerPointerGeneric);
+             target.addEventListener("pointerup", target.sdlEventHandlerPointerGeneric);
+-        }
+-    }, data, data->canvas_id);
++        } }, data, data->canvas_id);
+ }
+ 
+ static void Emscripten_unset_pointer_event_callbacks(SDL_WindowData *data)
+@@ -1062,8 +1070,7 @@ static void Emscripten_unset_pointer_event_callbacks(SDL_WindowData *data)
+             target.sdlEventHandlerPointerEnter = undefined;
+             target.sdlEventHandlerPointerLeave = undefined;
+             target.sdlEventHandlerPointerGeneric = undefined;
+-        }
+-    }, data->canvas_id);
++        } }, data->canvas_id);
+ }
+ 
+ EMSCRIPTEN_KEEPALIVE void Emscripten_HandleMouseButtonUpGlobal(SDL_VideoDevice *device, const Emscripten_PointerEvent *event)
+@@ -1089,13 +1096,12 @@ static void Emscripten_set_global_mouseup_callback(SDL_VideoDevice *device)
+                 var d = SDL3.makePointerEventCStruct(0, 0, event);
+                 if (d != 0)
+                 {
+-                    _Emscripten_HandleMouseButtonUpGlobal(SDL3.JSVarToCPtr($0), d);
+-                    _SDL_free(d);
++                    _SDL3_renamed_Emscripten_HandleMouseButtonUpGlobal(SDL3.JSVarToCPtr($0), d);
++                    _SDL3_renamed_SDL_free(d);
+                 }
+             };
+             target.addEventListener("pointerup", target.sdlEventHandlerMouseButtonUpGlobal);
+-        }
+-    }, device);
++        } }, device);
+ }
+ 
+ static void Emscripten_unset_global_mouseup_callback(SDL_VideoDevice *device)
+@@ -1148,7 +1154,7 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+ 
+             var makeDropEventCStruct = function(event) {
+                 var ptr = 0;
+-                ptr = _SDL_malloc($2);
++                ptr = _SDL3_renamed_SDL_malloc($2);
+                 if (ptr != 0) {
+                     var idx = ptr >> 2;
+                     var rect = target.getBoundingClientRect();
+@@ -1160,7 +1166,7 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+ 
+             SDL3.eventHandlerDropDragover = function(event) {
+                 event.preventDefault();
+-                var d = makeDropEventCStruct(event); if (d != 0) { _Emscripten_SendDragEvent(data, d); _SDL_free(d); }
++                var d = makeDropEventCStruct(event); if (d != 0) { _SDL3_renamed_Emscripten_SendDragEvent(data, d); _SDL3_renamed_SDL_free(d); }
+             };
+             target.addEventListener("dragover", SDL3.eventHandlerDropDragover);
+ 
+@@ -1174,8 +1180,8 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+                 event.preventDefault();
+                 if (event.dataTransfer.types.includes("text/plain")) {
+                     let plain_text = stringToNewUTF8(event.dataTransfer.getData("text/plain"));
+-                    _Emscripten_SendDragTextEvent(data, plain_text);
+-                    _Emscripten_force_free(plain_text);
++                    _SDL3_renamed_Emscripten_SendDragTextEvent(data, plain_text);
++                    _SDL3_renamed_Emscripten_force_free(plain_text);
+                 } else if (event.dataTransfer.types.includes("Files")) {
+                     let files_read = 0;
+                     const files_to_read = event.dataTransfer.files.length;
+@@ -1196,11 +1202,11 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+                                 var stream = FS.open(fs_filepath, "w");
+                                 FS.write(stream, contents_array8, 0, contents_array8.length, 0);
+                                 FS.close(stream);
+-                                _Emscripten_SendDragFileEvent(data, c_fs_filepath);
++                                _SDL3_renamed_Emscripten_SendDragFileEvent(data, c_fs_filepath);
+                             } catch (e) {
+                                 // if this threw an exception at any point, we skip this drop event. Sorry!
+                             }
+-                            _Emscripten_force_free(c_fs_filepath);
++                            _SDL3_renamed_Emscripten_force_free(c_fs_filepath);
+                             onFileRead();
+                         };
+                         file_reader.onerror = function(event) {
+@@ -1211,22 +1217,21 @@ static void Emscripten_set_drag_event_callbacks(SDL_WindowData *data)
+                     function onFileRead() {
+                         ++files_read;
+                         if (files_read === files_to_read) {
+-                            _Emscripten_SendDragCompleteEvent(data);
++                            _SDL3_renamed_Emscripten_SendDragCompleteEvent(data);
+                         }
+                     }
+                 }
+-                _Emscripten_SendDragCompleteEvent(data);
++                _SDL3_renamed_Emscripten_SendDragCompleteEvent(data);
+             };
+             target.addEventListener("drop", SDL3.eventHandlerDropDrop);
+ 
+             SDL3.eventHandlerDropDragend = function(event) {
+                 event.preventDefault();
+-                _Emscripten_SendDragCompleteEvent(data);
++                _SDL3_renamed_Emscripten_SendDragCompleteEvent(data);
+             };
+             target.addEventListener("dragend", SDL3.eventHandlerDropDragend);
+             target.addEventListener("dragleave", SDL3.eventHandlerDropDragend);
+-        }
+-    }, data, data->canvas_id, sizeof (Emscripten_DropEvent));
++        } }, data, data->canvas_id, sizeof(Emscripten_DropEvent));
+ }
+ 
+ static void Emscripten_unset_drag_event_callbacks(SDL_WindowData *data)
+@@ -1258,8 +1263,7 @@ static void Emscripten_unset_drag_event_callbacks(SDL_WindowData *data)
+             SDL3.eventHandlerDropDragover = undefined;
+             SDL3.eventHandlerDropDrop = undefined;
+             SDL3.eventHandlerDropDragend = undefined;
+-        }
+-    }, data->canvas_id);
++        } }, data->canvas_id);
+ }
+ 
+ static const char *Emscripten_GetKeyboardTargetElement(const char *target)
+@@ -1309,8 +1313,8 @@ EMSCRIPTEN_KEEPALIVE void Emscripten_HandleLockKeysCheck(SDL_WindowData *window_
+ {
+     const SDL_Keymod new_mods = (capslock ? SDL_KMOD_CAPS : 0) | (numlock ? SDL_KMOD_NUM : 0) | (scrolllock ? SDL_KMOD_SCROLL : 0);
+     SDL_Keymod modstate = SDL_GetModState();
+-    if ((modstate & (SDL_KMOD_CAPS|SDL_KMOD_NUM|SDL_KMOD_SCROLL)) != new_mods) {
+-        modstate &= ~(SDL_KMOD_CAPS|SDL_KMOD_NUM|SDL_KMOD_SCROLL);
++    if ((modstate & (SDL_KMOD_CAPS | SDL_KMOD_NUM | SDL_KMOD_SCROLL)) != new_mods) {
++        modstate &= ~(SDL_KMOD_CAPS | SDL_KMOD_NUM | SDL_KMOD_SCROLL);
+         modstate |= new_mods;
+         SDL_SetModState(modstate);
+     }
+@@ -1336,11 +1340,10 @@ void Emscripten_RegisterEventHandlers(SDL_WindowData *data)
+                 // don't try to adjust the state on the actual lock key presses; the normal key handler will catch that and adjust.
+                 if ((event.key != "CapsLock") && (event.key != "NumLock") && (event.key != "ScrollLock"))
+                 {
+-                    _Emscripten_HandleLockKeysCheck(Module['SDL3'].JSVarToCPtr(data), event.getModifierState("CapsLock"), event.getModifierState("NumLock"), event.getModifierState("ScrollLock"));
++                    _SDL3_renamed_Emscripten_HandleLockKeysCheck(Module['SDL3'].JSVarToCPtr(data), event.getModifierState("CapsLock"), event.getModifierState("NumLock"), event.getModifierState("ScrollLock"));
+                 }
+             };
+-            document.addEventListener("keydown", document.sdlEventHandlerLockKeysCheck);
+-        }, data);
++            document.addEventListener("keydown", document.sdlEventHandlerLockKeysCheck); }, data);
+         emscripten_set_keydown_callback(keyElement, data, 0, Emscripten_HandleKey);
+         emscripten_set_keyup_callback(keyElement, data, 0, Emscripten_HandleKey);
+         emscripten_set_keypress_callback(keyElement, data, 0, Emscripten_HandleKeyPress);
+diff --git a/src/video/emscripten/SDL_emscriptenmouse.c b/src/video/emscripten/SDL_emscriptenmouse.c
+index c2f4b817a..ac16d8375 100644
+--- a/src/video/emscripten/SDL_emscriptenmouse.c
++++ b/src/video/emscripten/SDL_emscriptenmouse.c
+@@ -106,7 +106,7 @@ static SDL_Cursor *Emscripten_CreateCursor(SDL_Surface *surface, int hot_x, int
+             ? "url(" + canvas.toDataURL() + "), auto"
+             : "url(" + canvas.toDataURL() + ") " + hot_x + " " + hot_y + ", auto";
+ 
+-        var urlBuf = _SDL_malloc(url.length + 1);
++        var urlBuf = _SDL3_renamed_SDL_malloc(url.length + 1);
+         stringToUTF8(url, urlBuf, url.length + 1);
+ 
+         return urlBuf;
+diff --git a/src/video/emscripten/SDL_emscriptenvideo.c b/src/video/emscripten/SDL_emscriptenvideo.c
+index 942809c4a..587de36bd 100644
+--- a/src/video/emscripten/SDL_emscriptenvideo.c
++++ b/src/video/emscripten/SDL_emscriptenvideo.c
+@@ -22,16 +22,16 @@
+ 
+ #ifdef SDL_VIDEO_DRIVER_EMSCRIPTEN
+ 
+-#include "../SDL_sysvideo.h"
+-#include "../SDL_pixels_c.h"
+-#include "../../events/SDL_events_c.h"
+ #include "../../SDL_hints_c.h"
++#include "../../events/SDL_events_c.h"
++#include "../SDL_pixels_c.h"
++#include "../SDL_sysvideo.h"
+ 
+-#include "SDL_emscriptenvideo.h"
+-#include "SDL_emscriptenopengles.h"
+-#include "SDL_emscriptenframebuffer.h"
+ #include "SDL_emscriptenevents.h"
++#include "SDL_emscriptenframebuffer.h"
+ #include "SDL_emscriptenmouse.h"
++#include "SDL_emscriptenopengles.h"
++#include "SDL_emscriptenvideo.h"
+ 
+ #define EMSCRIPTENVID_DRIVER_NAME "emscripten"
+ 
+@@ -43,7 +43,7 @@ static bool Emscripten_GetDisplayUsableBounds(SDL_VideoDevice *_this, SDL_VideoD
+ 
+ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID create_props);
+ static void Emscripten_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window);
+-static void Emscripten_SetWindowResizable(SDL_VideoDevice *_this, SDL_Window * window, bool resizable);
++static void Emscripten_SetWindowResizable(SDL_VideoDevice *_this, SDL_Window *window, bool resizable);
+ static void Emscripten_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
+ static void Emscripten_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window);
+ static SDL_FullscreenResult Emscripten_SetWindowFullscreen(SDL_VideoDevice *_this, SDL_Window *window, SDL_VideoDisplay *display, SDL_FullscreenOp fullscreen);
+@@ -103,8 +103,9 @@ static void Emscripten_ListenSystemTheme(void)
+         if (window.matchMedia) {
+             var SDL3 = Module['SDL3'];
+ 
+-            SDL3.eventHandlerThemeChanged = function(event) {
+-                _Emscripten_SendSystemThemeChangedEvent();
++            SDL3.eventHandlerThemeChanged = function(event)
++            {
++                _SDL3_renamed_Emscripten_SendSystemThemeChangedEvent();
+             };
+ 
+             SDL3.themeChangedMatchMedia = window.matchMedia('(prefers-color-scheme: dark)');
+@@ -116,7 +117,7 @@ static void Emscripten_ListenSystemTheme(void)
+ static void Emscripten_UnlistenSystemTheme(void)
+ {
+     MAIN_THREAD_EM_ASM({
+-        if (typeof(Module['SDL3']) !== 'undefined') {
++        if (typeof(Module['SDL3']) != 'undefined') {
+             var SDL3 = Module['SDL3'];
+ 
+             SDL3.themeChangedMatchMedia.removeEventListener('change', SDL3.eventHandlerThemeChanged);
+@@ -195,7 +196,8 @@ static SDL_VideoDevice *Emscripten_CreateDevice(void)
+     return device;
+ }
+ 
+-static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, int *buttonID) {
++static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, int *buttonID)
++{
+     if (emscripten_has_asyncify() && SDL_GetHintBoolean(SDL_HINT_EMSCRIPTEN_ASYNCIFY, true)) {
+         char dialog_background[32];
+         char dialog_color[32];
+@@ -253,8 +255,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata,
+             p.innerText = message;
+             dialog.append(p);
+ 
+-            dialog.showModal();
+-        }, messageboxdata->title, messageboxdata->message, dialog_background, dialog_color, dialog_id);
++            dialog.showModal(); }, messageboxdata->title, messageboxdata->message, dialog_background, dialog_color, dialog_id);
+ 
+         int i;
+         for (i = 0; i < messageboxdata->numbuttons; ++i) {
+@@ -304,17 +305,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata,
+                     };
+ 
+                     dialog.append(button);
+-                    return true;
+-                },
+-                dialog_id,
+-                button.text,
+-                button.buttonID,
+-                button.flags & SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT,
+-                button.flags & SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT,
+-                button_border,
+-                button_background,
+-                button_hovered
+-            );
++                    return true; }, dialog_id, button.text, button.buttonID, button.flags & SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, button.flags & SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, button_border, button_background, button_hovered);
+ 
+             if (!created) {
+                 return false;
+@@ -332,8 +323,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata,
+                 if (!dialog) {
+                     return false;
+                 }
+-                return dialog.open;
+-            }, dialog_id);
++                return dialog.open; }, dialog_id);
+ 
+             if (dialog_open) {
+                 continue;
+@@ -352,16 +342,13 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata,
+                 catch(e)
+                 {
+                     return 0;
+-                }
+-            }, dialog_id);
++                } }, dialog_id);
+             break;
+         }
+ 
+     } else {
+         // Cannot add elements to DOM and block without Asyncify. So, fall back to the alert function.
+-        EM_ASM({
+-            alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1));
+-        }, messageboxdata->title, messageboxdata->message);
++        EM_ASM({ alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1)); }, messageboxdata->title, messageboxdata->message);
+     }
+     return true;
+ }
+@@ -499,8 +486,7 @@ static bool Emscripten_SetWindowFillDocument(SDL_VideoDevice *_this, SDL_Window
+             document.body.appendChild(canvas);
+             canvas.style.position = 'fixed';
+             canvas.style.top = '0';
+-            canvas.style.left = '0';
+-        }, wdata->canvas_id);
++            canvas.style.left = '0'; }, wdata->canvas_id);
+ 
+         emscripten_set_canvas_element_size(wdata->canvas_id, SDL_lroundf(scaled_w), SDL_lroundf(scaled_h));
+ 
+@@ -565,8 +551,8 @@ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window,
+ 
+     bool fill_document = ((window->flags & SDL_WINDOW_FILL_DOCUMENT) != 0);
+     if (fill_document && Emscripten_fill_document_window) {
+-        fill_document = false;  // only one allowed at a time.
+-        window->flags &= ~SDL_WINDOW_FILL_DOCUMENT;   // !!! FIXME: should this fail instead?
++        fill_document = false;                      // only one allowed at a time.
++        window->flags &= ~SDL_WINDOW_FILL_DOCUMENT; // !!! FIXME: should this fail instead?
+     }
+ 
+     // Allocate window internal data
+@@ -599,9 +585,9 @@ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window,
+ 
+     wdata->external_size = SDL_floor(css_w) != 1 || SDL_floor(css_h) != 1;
+     if (wdata->external_size) {
+-        fill_document = false;  // can't be resizable if something else is controlling it.
+-        window->w = (int) css_w;
+-        window->h = (int) css_h;
++        fill_document = false; // can't be resizable if something else is controlling it.
++        window->w = (int)css_w;
++        window->h = (int)css_h;
+     }
+ 
+     wdata->window = window;
+@@ -622,9 +608,8 @@ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window,
+     // Make the emscripten "fullscreen" button go through SDL.
+     MAIN_THREAD_EM_ASM({
+         Module['requestFullscreen'] = function(lockPointer, resizeCanvas) {
+-            _requestFullscreenThroughSDL($0);
+-        };
+-    }, window);
++            _SDL3_renamed_requestFullscreenThroughSDL($0);
++        }; }, window);
+ 
+     // Ensure various things are added to the window's properties
+     SDL_SetStringProperty(window->props, SDL_PROP_WINDOW_EMSCRIPTEN_CANVAS_ID_STRING, wdata->canvas_id);
+@@ -634,7 +619,7 @@ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window,
+     return true;
+ }
+ 
+-static void Emscripten_SetWindowResizable(SDL_VideoDevice *_this, SDL_Window * window, bool resizable)
++static void Emscripten_SetWindowResizable(SDL_VideoDevice *_this, SDL_Window *window, bool resizable)
+ {
+     // this function just has to exist or the higher level won't let the window change its SDL_WINDOW_RESIZABLE flag.
+ }
+@@ -644,7 +629,7 @@ static void Emscripten_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
+     if (window->internal) {
+         SDL_WindowData *data = window->internal;
+         if (window == Emscripten_fill_document_window) {
+-            return;  // canvas size is being dictated by the browser window size, refuse request.
++            return; // canvas size is being dictated by the browser window size, refuse request.
+         }
+ 
+         // update pixel ratio
+@@ -698,7 +683,7 @@ static void Emscripten_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
+ 
+     MAIN_THREAD_EM_ASM({
+         // just ignore clicks on the fullscreen button while there's no SDL window.
+-        Module['requestFullscreen'] = function(lockPointer, resizeCanvas) {};
++        Module['requestFullscreen'] = function(lockPointer, resizeCanvas){};
+     });
+ }
+ 
+@@ -711,13 +696,14 @@ static SDL_FullscreenResult Emscripten_SetWindowFullscreen(SDL_VideoDevice *_thi
+         data = window->internal;
+ 
+         if (data->fullscreen_change_in_progress) {
+-            return SDL_FULLSCREEN_FAILED;;
++            return SDL_FULLSCREEN_FAILED;
++            ;
+         }
+ 
+         EmscriptenFullscreenChangeEvent fsevent;
+         if (emscripten_get_fullscreen_status(&fsevent) == EMSCRIPTEN_RESULT_SUCCESS) {
+             if ((fullscreen == SDL_FULLSCREEN_OP_ENTER) == fsevent.isFullscreen) {
+-                return SDL_FULLSCREEN_SUCCEEDED;  // already there.
++                return SDL_FULLSCREEN_SUCCEEDED; // already there.
+             }
+         }
+ 
+@@ -751,7 +737,7 @@ static SDL_FullscreenResult Emscripten_SetWindowFullscreen(SDL_VideoDevice *_thi
+     }
+ 
+     if (res == EMSCRIPTEN_RESULT_SUCCESS) {
+-        data->fullscreen_change_in_progress = true;   // even on success, this might animate to the new state.
++        data->fullscreen_change_in_progress = true; // even on success, this might animate to the new state.
+         return SDL_FULLSCREEN_SUCCEEDED;
+     } else if (res == EMSCRIPTEN_RESULT_DEFERRED) {
+         data->fullscreen_change_in_progress = true;
+@@ -784,8 +770,7 @@ static bool Emscripten_SetWindowIcon(SDL_VideoDevice *_this, SDL_Window *window,
+     void *png_data = SDL_GetPointerProperty(
+         SDL_GetIOProperties(stream),
+         SDL_PROP_IOSTREAM_DYNAMIC_MEMORY_POINTER,
+-        NULL
+-    );
++        NULL);
+     size_t png_size = (size_t)SDL_GetIOSize(stream);
+ 
+     // Pass PNG data to JavaScript
+@@ -811,8 +796,7 @@ static bool Emscripten_SetWindowIcon(SDL_VideoDevice *_this, SDL_Window *window,
+             URL.revokeObjectURL(link.href);
+         }
+ 
+-        link.href = url;
+-    }, png_data, png_size);
++        link.href = url; }, png_data, png_size);
+ 
+     SDL_CloseIO(stream);
+     return true;
