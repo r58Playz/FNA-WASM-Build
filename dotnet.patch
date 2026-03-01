@@ -315,7 +315,7 @@ index a09111c490b..0f3473ca8a7 100644
  #else
  #define INTERP_ICALL_TRAMP_IARGS 12
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index ac69cd2d8f8..6dbc383a086 100644
+index ac69cd2d8f8..06f45215b53 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
 @@ -3642,7 +3642,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
@@ -329,6 +329,15 @@ index ac69cd2d8f8..6dbc383a086 100644
  				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
  			else {
  				csignature = mono_metadata_parse_signature_checked (image, token, error);
+@@ -5953,7 +5955,7 @@ retry_emit:
+ 			if (td->sp > td->stack)
+ 				g_warning ("CEE_JMP: stack must be empty");
+ 			token = read32 (td->ip + 1);
+-			m = mono_get_method_checked (image, token, NULL, generic_context, error);
++			m = interp_get_method (method, token, NULL, generic_context, error);
+ 			goto_if_nok (error, exit);
+ 			interp_add_ins (td, MINT_JMP);
+ 			td->last_ins->data [0] = get_data_item_index_imethod (td, mono_interp_get_imethod (m));
 @@ -10022,11 +10024,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
  	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
  	return_if_nok (error);
