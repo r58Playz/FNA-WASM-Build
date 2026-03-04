@@ -238,67 +238,37 @@ index f641c393dd7..2a7b3f1fee3 100644
  
  		if (method) {
 diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
-index 0a12875dcce..85e07d1ef2b 100644
+index 0a12875dcce..cfa161b000d 100644
 --- a/src/mono/mono/mini/interp/interp.c
 +++ b/src/mono/mono/mini/interp/interp.c
-@@ -2390,6 +2390,59 @@ interp_entry (InterpEntryData *data)
+@@ -2390,6 +2390,16 @@ interp_entry (InterpEntryData *data)
  			return;
  		}
  	} else {
++#ifdef TARGET_WASM
 +		if (context->has_resume_state) {
-+			// Print exception details before asserting
-+			g_printerr ("\n========================================\n");
-+			g_printerr ("[INTERP] ERROR: Unhandled exception in interp_entry - has_resume_state is set\n");
-+			g_printerr ("[INTERP] Method: %s.%s\n", 
-+				method->klass->name_space ? method->klass->name_space : "<no namespace>",
-+				method->name ? method->name : "<no name>");
-+			
-+			if (context->exc_gchandle) {
-+				MonoObject *exc = mono_gchandle_get_target_internal (context->exc_gchandle);
-+				if (exc) {
-+					MonoClass *exc_class = mono_object_class (exc);
-+					const char *exc_namespace = m_class_get_name_space (exc_class);
-+					const char *exc_name = m_class_get_name (exc_class);
-+					g_printerr ("[INTERP] Exception type: %s.%s\n",
-+						exc_namespace ? exc_namespace : "<no namespace>",
-+						exc_name ? exc_name : "<no name>");
-+					
-+					// Try to get the exception message
-+					ERROR_DECL (error);
-+					MonoString *msg_str = NULL;
-+					MonoObject *other_exc = NULL;
-+					msg_str = mono_object_try_to_string (exc, &other_exc, error);
-+					if (msg_str && !other_exc && is_ok (error)) {
-+						char *msg = mono_string_to_utf8_checked_internal (msg_str, error);
-+						if (msg && is_ok (error)) {
-+							g_printerr ("[INTERP] Exception message: %s\n", msg);
-+							g_free (msg);
-+						}
-+					}
-+					if (!is_ok (error))
-+						mono_error_cleanup (error);
-+					
-+					// Get managed backtrace
-+					char *backtrace = mono_exception_get_managed_backtrace ((MonoException*)exc);
-+					if (backtrace) {
-+						g_printerr ("[INTERP] Managed stack trace:\n%s\n", backtrace);
-+						g_free (backtrace);
-+					} else {
-+						g_printerr ("[INTERP] No managed stack trace available\n");
-+					}
-+					
-+					// Also call the standard exception printer
-+					g_printerr ("[INTERP] Full exception details:\n");
-+					mono_print_unhandled_exception_internal (exc);
-+				} else {
-+					g_printerr ("[INTERP] Exception GC handle is set but target is NULL\n");
-+				}
-+			} else {
-+				g_printerr ("[INTERP] has_resume_state is set but exc_gchandle is NULL\n");
-+			}
-+			g_printerr ("========================================\n\n");
++			/*
++			 * On wasm, native frames between this callback and the handler frame
++			 * cannot be skipped during EH. Return to native code and let EH
++			 * continue when control reaches the interpreter again.
++			 */
++			return;
 +		}
++#endif
  		g_assert (!context->has_resume_state);
+ 	}
+ 
+@@ -9266,6 +9276,12 @@ mono_jiterp_interp_entry (JiterpEntryData *_data, void *res)
+ 			return;
+ 		}
+ 	} else {
++#ifdef TARGET_WASM
++		if (header.context->has_resume_state) {
++			/* Same as interp_entry (): return so outer interp can resume EH. */
++			return;
++		}
++#endif
+ 		g_assert (!header.context->has_resume_state);
  	}
  
 diff --git a/src/mono/mono/mini/interp/interp.h b/src/mono/mono/mini/interp/interp.h
