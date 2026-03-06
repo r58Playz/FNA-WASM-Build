@@ -285,10 +285,50 @@ index a09111c490b..0f3473ca8a7 100644
  #else
  #define INTERP_ICALL_TRAMP_IARGS 12
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index ac69cd2d8f8..06f45215b53 100644
+index 9052f294215..3fa9b97e3f3 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -3642,7 +3642,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
+@@ -3281,6 +3281,7 @@ interp_inline_newobj (TransformData *td, MonoMethod *target_method, MonoMethodSi
+ 	InterpInst *newobj_fast, *prev_last_ins;
+ 	int dreg, this_reg = -1;
+ 	int prev_sp_offset;
++	StackInfo *saved_prefix = NULL;
+ 	MonoClass *klass = target_method->klass;
+ 	MonoMethodHeader *mheader = NULL;
+ 
+@@ -3294,6 +3295,10 @@ interp_inline_newobj (TransformData *td, MonoMethod *target_method, MonoMethodSi
+ 
+ 	prev_last_ins = td->cbb->last_ins;
+ 	prev_sp_offset = GPTRDIFF_TO_INT (td->sp - td->stack);
++	if (prev_sp_offset > 0) {
++		saved_prefix = (StackInfo*)mono_mempool_alloc (td->mempool, sizeof (StackInfo) * prev_sp_offset);
++		memcpy (saved_prefix, td->stack, sizeof (StackInfo) * prev_sp_offset);
++	}
+ 
+ 	// Allocate var holding the newobj result. We do it here, because the var has to be alive
+ 	// before the call, since newobj writes to it before executing the call.
+@@ -3353,6 +3358,11 @@ interp_inline_newobj (TransformData *td, MonoMethod *target_method, MonoMethodSi
+ 		goto fail;
+ 	td->ip += 5;
+ 
++	// Constructor inlining must preserve stack entries below ctor args.
++	if (saved_prefix)
++		memcpy (td->stack, saved_prefix, sizeof (StackInfo) * prev_sp_offset);
++	td->sp = td->stack + prev_sp_offset;
++
+ 	td->headers_to_free = g_slist_prepend_mempool (td->mempool, td->headers_to_free, mheader);
+ 
+ 	push_var (td, dreg);
+@@ -3361,6 +3371,8 @@ fail:
+ 	td->ip += 5;
+ 	mono_metadata_free_mh (mheader);
+ 	// Restore the state
++	if (saved_prefix)
++		memcpy (td->stack, saved_prefix, sizeof (StackInfo) * prev_sp_offset);
+ 	td->sp = td->stack + prev_sp_offset;
+ 	td->last_ins = prev_last_ins;
+ 	td->cbb->last_ins = prev_last_ins;
+@@ -3675,7 +3687,9 @@ interp_transform_call (TransformData *td, MonoMethod *method, MonoMethod *target
  	if (target_method == NULL) {
  		if (calli) {
  			CHECK_STACK_RET(td, 1, FALSE);
@@ -299,7 +339,7 @@ index ac69cd2d8f8..06f45215b53 100644
  				csignature = (MonoMethodSignature *)mono_method_get_wrapper_data (method, token);
  			else {
  				csignature = mono_metadata_parse_signature_checked (image, token, error);
-@@ -5953,7 +5955,7 @@ retry_emit:
+@@ -5990,7 +6004,7 @@ retry_emit:
  			if (td->sp > td->stack)
  				g_warning ("CEE_JMP: stack must be empty");
  			token = read32 (td->ip + 1);
@@ -308,15 +348,3 @@ index ac69cd2d8f8..06f45215b53 100644
  			goto_if_nok (error, exit);
  			interp_add_ins (td, MINT_JMP);
  			td->last_ins->data [0] = get_data_item_index_imethod (td, mono_interp_get_imethod (m));
-@@ -10022,11 +10024,6 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
- 	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
- 	return_if_nok (error);
- 
--	if (!method_class_vt->initialized) {
--		mono_runtime_class_init_full (method_class_vt, error);
--		return_if_nok (error);
--	}
--
- 	MONO_PROFILER_RAISE (jit_begin, (method));
- 
- 	if (mono_method_signature_internal (method)->is_inflated)

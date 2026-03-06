@@ -203,6 +203,7 @@ jobs:
         run: |
           cd liba/runtime/
           git apply ../../dotnet.patch
+          git apply ../../dotnet-static-init.patch
           git apply ../../dotnet-jiterp.patch
           git apply ../../dotnet-relax-typeload.patch
           THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
