@@ -1,3 +1,47 @@
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/RuntimeMethodInfo.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/RuntimeMethodInfo.Mono.cs
+index e95f430478a..ec32e39346e 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/RuntimeMethodInfo.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/RuntimeMethodInfo.Mono.cs
+@@ -453,7 +453,20 @@ public override object[] GetCustomAttributes(Type attributeType, bool inherit)
+ 
+             /* MS.NET doesn't report MethodImplAttribute */
+ 
+-            MonoMethodInfo info = MonoMethodInfo.GetMethodInfo(mhandle);
++            MonoMethodInfo info;
++            // The native get_method_info icall eagerly resolves the method's return/declaring
++            // types. If the method references types from an optional dependency assembly that
++            // is not loaded (e.g. a Celeste/Everest optional mod dependency), mono will throw
++            // rather than deferring resolution as CoreCLR does. Match CoreCLR behaviour by
++            // treating a missing-assembly error as "no pseudo-attributes".
++            try
++            {
++                info = MonoMethodInfo.GetMethodInfo(mhandle);
++            }
++            catch (Exception e) when (e is System.IO.FileNotFoundException || e is TypeLoadException || e is BadImageFormatException)
++            {
++                return null;
++            }
+             if ((info.iattrs & MethodImplAttributes.PreserveSig) != 0)
+                 count++;
+             if ((info.attrs & MethodAttributes.PinvokeImpl) != 0)
+@@ -534,7 +547,16 @@ private DllImportAttribute GetDllImportAttribute()
+ 
+             /* MS.NET doesn't report MethodImplAttribute */
+ 
+-            MonoMethodInfo info = MonoMethodInfo.GetMethodInfo(mhandle);
++            MonoMethodInfo info;
++            // Same guard as GetPseudoCustomAttributes() — see comment there.
++            try
++            {
++                info = MonoMethodInfo.GetMethodInfo(mhandle);
++            }
++            catch (Exception e) when (e is System.IO.FileNotFoundException || e is TypeLoadException || e is BadImageFormatException)
++            {
++                return null;
++            }
+             if ((info.iattrs & MethodImplAttributes.PreserveSig) != 0)
+                 count++;
+             if ((info.attrs & MethodAttributes.PinvokeImpl) != 0)
 diff --git a/src/mono/mono/metadata/class-init.c b/src/mono/mono/metadata/class-init.c
 index 348883da0ad..1ab7410538c 100644
 --- a/src/mono/mono/metadata/class-init.c
