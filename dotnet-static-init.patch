@@ -50,11 +50,37 @@ index 7065b6fe85f..3c8a60a7d0f 100644
  	/* speedup later... and use a timeout */
  	/* g_print ("Finalize run on %p %s.%s\n", o, mono_object_class (o)->name_space, mono_object_class (o)->name); */
  
+diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
+index cfa161b000d..469960299c4 100644
+--- a/src/mono/mono/mini/interp/interp.c
++++ b/src/mono/mono/mini/interp/interp.c
+@@ -5991,7 +5991,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+ 		}
+ 		MINT_IN_CASE(MINT_NEWOBJ) {
+ 			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [4]];
+-			INIT_VTABLE (vtable);
++			if (!mono_class_is_before_field_init (vtable->klass)) {
++				INIT_VTABLE (vtable);
++			}
+ 			guint16 imethod_index = ip [3];
+ 			return_offset = ip [1];
+ 			call_args_offset = ip [2];
+@@ -6015,7 +6017,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+ 		}
+ 		MINT_IN_CASE(MINT_NEWOBJ_INLINED) {
+ 			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [2]];
+-			INIT_VTABLE (vtable);
++			if (!mono_class_is_before_field_init (vtable->klass)) {
++				INIT_VTABLE (vtable);
++			}
+ 
+ 			// FIXME push/pop LMF
+ 			MonoObject *o = mono_gc_alloc_obj (vtable, m_class_get_instance_size (vtable->klass));
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 5629e77c7ff..f94846c7e09 100644
+index 27497780aad..02416e0059d 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -3005,6 +3005,39 @@ is_metadata_update_disabled (void)
+@@ -3003,6 +3003,39 @@ is_metadata_update_disabled (void)
  	return disabled;
  }
  
@@ -94,7 +120,7 @@ index 5629e77c7ff..f94846c7e09 100644
  static gboolean
  interp_method_check_inlining (TransformData *td, MonoMethod *method, MonoMethodSignature *csignature)
  {
-@@ -4855,6 +4888,8 @@ interp_emit_ldsflda (TransformData *td, MonoClassField *field, MonoError *error)
+@@ -4865,6 +4898,8 @@ interp_emit_ldsflda (TransformData *td, MonoClassField *field, MonoError *error)
  
  	push_simple_type (td, STACK_TYPE_MP);
  	if (mono_class_field_is_special_static (field)) {
@@ -103,7 +129,7 @@ index 5629e77c7ff..f94846c7e09 100644
  		guint32 offset = GPOINTER_TO_UINT (mono_special_static_field_get_offset (field, error));
  		mono_error_assert_ok (error);
  		g_assert (offset);
-@@ -4933,6 +4968,8 @@ interp_emit_sfld_access (TransformData *td, MonoClassField *field, MonoClass *fi
+@@ -4943,6 +4978,8 @@ interp_emit_sfld_access (TransformData *td, MonoClassField *field, MonoClass *fi
  	}
  
  	if (mono_class_field_is_special_static (field)) {
@@ -112,7 +138,7 @@ index 5629e77c7ff..f94846c7e09 100644
  		guint32 offset = GPOINTER_TO_UINT (mono_special_static_field_get_offset (field, error));
  		mono_error_assert_ok (error);
  		g_assert (offset && (offset & 0x80000000) == 0);
-@@ -10024,7 +10061,7 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
+@@ -10034,7 +10071,7 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
  	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
  	return_if_nok (error);
  
