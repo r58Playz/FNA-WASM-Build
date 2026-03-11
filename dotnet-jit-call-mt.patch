@@ -1,0 +1,683 @@
+diff --git a/src/mono/browser/runtime/cwraps.ts b/src/mono/browser/runtime/cwraps.ts
+index e693c522363..98e2c128698 100644
+--- a/src/mono/browser/runtime/cwraps.ts
++++ b/src/mono/browser/runtime/cwraps.ts
+@@ -97,6 +97,8 @@ const fn_signatures: SigLine[] = [
+     [true, "mono_jiterp_get_options_version", "number", []],
+     [true, "mono_jiterp_adjust_abort_count", "number", ["number", "number"]],
+     [true, "mono_jiterp_register_jit_call_thunk", "void", ["number", "number"]],
++    [true, "mono_jiterp_alloc_entry_data", "number", ["number", "number"]],
++    [true, "mono_jiterp_free_entry_data", "void", ["number"]],
+     [true, "mono_jiterp_type_get_raw_value_size", "number", ["number"]],
+     [true, "mono_jiterp_get_signature_has_this", "number", ["number"]],
+     [true, "mono_jiterp_get_signature_return_type", "number", ["number"]],
+@@ -225,6 +227,8 @@ export interface t_Cwraps {
+     mono_jiterp_get_options_version(): number;
+     mono_jiterp_adjust_abort_count(opcode: number, delta: number): number;
+     mono_jiterp_register_jit_call_thunk(cinfo: number, func: number): void;
++    mono_jiterp_alloc_entry_data(rmethod: number, paramsCount: number): number;
++    mono_jiterp_free_entry_data(data: number): void;
+     mono_jiterp_get_signature_has_this(sig: VoidPtr): number;
+     mono_jiterp_get_signature_return_type(sig: VoidPtr): MonoType;
+     mono_jiterp_get_signature_param_count(sig: VoidPtr): number;
+diff --git a/src/mono/browser/runtime/jiterpreter-interp-entry.ts b/src/mono/browser/runtime/jiterpreter-interp-entry.ts
+index 176ecec246a..e68188d2219 100644
+--- a/src/mono/browser/runtime/jiterpreter-interp-entry.ts
++++ b/src/mono/browser/runtime/jiterpreter-interp-entry.ts
+@@ -5,8 +5,7 @@ import { MonoMethod, MonoType } from "./types/internal";
+ import { NativePointer } from "./types/emscripten";
+ import { mono_assert } from "./globals";
+ import {
+-    setI32, getU32_unaligned, _zero_region,
+-    malloc,
++    getU32_unaligned,
+     free
+ } from "./memory";
+ import { WasmOpcode } from "./jiterpreter-opcodes";
+@@ -50,9 +49,7 @@ typedef struct {
+ */
+ 
+ const
+-    maxInlineArgs = 16,
+-    // just allocate a bunch of extra space
+-    sizeOfJiterpEntryData = 64;
++    maxInlineArgs = 16;
+ 
+ const maxJitQueueLength = 4,
+     queueFlushDelayMs = 10;
+@@ -96,9 +93,11 @@ class TrampolineInfo {
+     private name?: string;
+     private traceName?: string;
+ 
++    private scratchData?: number;
++
+     defaultImplementation: number;
+     result: number;
+-    hitCount: number;
++    paramsCount: number;
+ 
+     constructor (
+         imethod: number, method: MonoMethod, argumentCount: number, pParamTypes: NativePointer,
+@@ -113,9 +112,21 @@ class TrampolineInfo {
+         this.paramTypes = new Array(argumentCount);
+         for (let i = 0; i < argumentCount; i++)
+             this.paramTypes[i] = <any>getU32_unaligned(<any>pParamTypes + (i * 4));
++        this.paramsCount = this.paramTypes.length + (this.hasThisReference ? 1 : 0);
+         this.defaultImplementation = defaultImplementation;
+         this.result = 0;
+-        this.hitCount = 0;
++    }
++
++    getScratchData (): number {
++        if (this.scratchData === undefined)
++            this.scratchData = cwraps.mono_jiterp_alloc_entry_data(this.imethod, this.paramsCount) as any;
++        return this.scratchData!;
++    }
++
++    dispose (): void {
++        if (this.scratchData)
++            cwraps.mono_jiterp_free_entry_data(this.scratchData as any);
++        this.scratchData = undefined;
+     }
+ 
+     generateName () {
+@@ -161,11 +172,14 @@ let mostRecentOptions: JiterpreterOptions | undefined = undefined;
+ //  allocated at that exact memory offset later) and more importantly, ensure it is
+ //  not waiting in the jit queue
+ export function mono_jiterp_free_method_data_interp_entry (imethod: number) {
++    imethod = imethod >>> 0;
++    const info = infoTable[imethod];
++    if (info)
++        info.dispose();
+     delete infoTable[imethod];
+ }
+ 
+-// FIXME: move this counter into C and make it thread safe
+-export function mono_interp_record_interp_entry (imethod: number) {
++export function mono_interp_record_interp_entry (imethod: number, hitCount: number) {
+     // clear the unbox bit
+     imethod = (imethod & ~0x1) >>> 0;
+ 
+@@ -177,10 +191,9 @@ export function mono_interp_record_interp_entry (imethod: number) {
+     if (!mostRecentOptions)
+         mostRecentOptions = getOptions();
+ 
+-    info.hitCount++;
+-    if (info.hitCount === mostRecentOptions!.interpEntryFlushThreshold)
++    if (hitCount === mostRecentOptions!.interpEntryFlushThreshold)
+         flush_wasm_entry_trampoline_jit_queue();
+-    else if (info.hitCount !== mostRecentOptions!.interpEntryHitCount)
++    else if (hitCount !== mostRecentOptions!.interpEntryHitCount)
+         return;
+ 
+     const jitQueueLength = cwraps.mono_jiterp_tlqueue_add(JitQueue.InterpEntry, <any>imethod);
+@@ -551,23 +564,7 @@ function append_stackval_from_data (
+ function generate_wasm_body (
+     builder: WasmBuilder, info: TrampolineInfo
+ ): boolean {
+-    // FIXME: This is not thread-safe, but the alternative of alloca makes the trampoline
+-    //  more expensive
+-    // The solution is likely to put the address of the scratch buffer in a global that we provide
+-    //  at module instantiation time, so each thread can malloc its own copy of the buffer
+-    //  and then pass it in when instantiating instead of compiling the constant into the module
+-    // FIXME: Pre-allocate these buffers and their constant slots at the start before we
+-    //  generate function bodies, so that even if we run out of constant slots for MonoType we
+-    //  will always have put the buffers in a constant slot. This will be necessary for thread safety
+-    const scratchBuffer = <any>malloc(sizeOfJiterpEntryData);
+-    _zero_region(scratchBuffer, sizeOfJiterpEntryData);
+-
+-    // Initialize the parameter count in the data blob. This is used to calculate the new value of sp
+-    //  before entering the interpreter
+-    setI32(
+-        scratchBuffer + getMemberOffset(JiterpMember.ParamsCount),
+-        info.paramTypes.length + (info.hasThisReference ? 1 : 0)
+-    );
++    const scratchBuffer = info.getScratchData();
+ 
+     // the this-reference may be a boxed struct that needs to be unboxed, for example calling
+     //  methods like object.ToString on structs will end up with the unbox flag set
+diff --git a/src/mono/browser/runtime/jiterpreter-jit-call.ts b/src/mono/browser/runtime/jiterpreter-jit-call.ts
+index b0516d1e5c8..701b82f2929 100644
+--- a/src/mono/browser/runtime/jiterpreter-jit-call.ts
++++ b/src/mono/browser/runtime/jiterpreter-jit-call.ts
+@@ -230,7 +230,7 @@ export function mono_jiterp_free_method_data_jit_call (method: MonoMethod) {
+         return;
+ 
+     for (let i = 0; i < infoArray.length; i++)
+-        delete targetCache[infoArray[i].addr];
++        delete targetCache[infoArray[i].target];
+ 
+     delete infosByMethod[<any>method];
+ }
+diff --git a/src/mono/mono/mini/interp/interp-internals.h b/src/mono/mono/mini/interp/interp-internals.h
+index 41407a2fd67..ab5796fa208 100644
+--- a/src/mono/mono/mini/interp/interp-internals.h
++++ b/src/mono/mono/mini/interp/interp-internals.h
+@@ -187,6 +187,7 @@ struct InterpMethod {
+ #if HOST_BROWSER
+ 	unsigned int contains_traces : 1;
+ 	MonoBitSet *address_taken_bits;
++	volatile gint32 jiterp_interp_entry_hit_count;
+ #endif
+ #if PROFILE_INTERP
+ 	long calls;
+diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
+index 469960299c4..4ca33a8b7e6 100644
+--- a/src/mono/mono/mini/interp/interp.c
++++ b/src/mono/mono/mini/interp/interp.c
+@@ -2701,8 +2701,8 @@ struct _JitCallInfo {
+ 	int ret_mt;
+ 	gboolean no_wrapper;
+ #if HOST_BROWSER
+-	int hit_count;
+-	WasmJitCallThunk jiterp_thunk;
++	volatile gint32 hit_count;
++	volatile gpointer jiterp_thunk;
+ #endif
+ };
+ 
+@@ -2800,7 +2800,7 @@ init_jit_call_info (InterpMethod *rmethod, MonoError *error)
+ #if HOST_BROWSER
+ EMSCRIPTEN_KEEPALIVE void
+ mono_jiterp_register_jit_call_thunk (void *cinfo, WasmJitCallThunk thunk) {
+-	((JitCallInfo*)cinfo)->jiterp_thunk = thunk;
++	mono_atomic_store_ptr (&((JitCallInfo*)cinfo)->jiterp_thunk, thunk);
+ }
+ #endif
+ 
+@@ -2829,8 +2829,7 @@ do_jit_call (ThreadContext *context, stackval *ret_sp, stackval *sp, InterpFrame
+ 	//  enough to justify it. At that point we can invoke the thunk to efficiently do most of
+ 	//  the work that would normally be done by do_jit_call
+ 	if (mono_opt_jiterpreter_jit_call_enabled) {
+-		// FIXME: Thread safety for the thunk pointer
+-		WasmJitCallThunk thunk = cinfo->jiterp_thunk;
++		WasmJitCallThunk thunk = (WasmJitCallThunk)mono_atomic_load_ptr (&cinfo->jiterp_thunk);
+ 		if (thunk) {
+ 			MonoFtnDesc ftndesc = {0};
+ 			ftndesc.addr = cinfo->addr;
+@@ -2862,7 +2861,7 @@ do_jit_call (ThreadContext *context, stackval *ret_sp, stackval *sp, InterpFrame
+ 			else
+ 				goto epilogue;
+ 		} else {
+-			int old_count = mono_jiterp_increment_counter (&cinfo->hit_count);
++			int old_count = mono_jiterp_increment_counter ((volatile int *)&cinfo->hit_count);
+ 			// If our hit count just reached the threshold, we request that a thunk be jitted
+ 			//  for this specific call site. It will go into a queue and wait until there
+ 			//  are enough jit calls waiting to be compiled into one WASM module
+@@ -3067,8 +3066,12 @@ init_arglist (InterpFrame *frame, MonoMethodSignature *sig, stackval *sp, char *
+  *  paying the cost of the hit counter and the entry will become faster.
+  */
+ #define INTERP_ENTRY_UPDATE_HIT_COUNT(_method) \
+-	if (mono_opt_jiterpreter_interp_entry_enabled) \
+-		mono_interp_record_interp_entry (_method)
++	do { \
++		if (mono_opt_jiterpreter_interp_entry_enabled) { \
++			int _hit_count = mono_jiterp_record_interp_entry_hit (_method); \
++			mono_interp_record_interp_entry (_method, _hit_count); \
++		} \
++	} while (0)
+ #else
+ #define INTERP_ENTRY_UPDATE_HIT_COUNT(_method)
+ #endif
+diff --git a/src/mono/mono/mini/interp/jiterpreter.c b/src/mono/mono/mini/interp/jiterpreter.c
+index 887038ca47f..e2a916d6799 100644
+--- a/src/mono/mono/mini/interp/jiterpreter.c
++++ b/src/mono/mono/mini/interp/jiterpreter.c
+@@ -57,8 +57,8 @@ void jiterp_preserve_module (void);
+ 
+ #include "jiterpreter.h"
+ 
+-static gint32 jiterpreter_abort_counts[MINT_LASTOP + 1] = { 0 };
+-static int64_t jiterp_trace_bailout_counts[256] = { 0 };
++static volatile gint32 jiterpreter_abort_counts[MINT_LASTOP + 1] = { 0 };
++static volatile gint64 jiterp_trace_bailout_counts[256] = { 0 };
+ 
+ // We disable this diagnostic because EMSCRIPTEN_KEEPALIVE makes it a false alarm, the keepalive
+ //  functions are being used externally. Having a bunch of prototypes is pointless since these
+@@ -492,9 +492,8 @@ mono_jiterp_type_get_raw_value_size (MonoType *type) {
+ EMSCRIPTEN_KEEPALIVE void
+ mono_jiterp_trace_bailout (int reason)
+ {
+-	// FIXME: Harmless race condition if threads are in use
+-	if (reason < 256)
+-		jiterp_trace_bailout_counts[reason]++;
++	if ((reason >= 0) && (reason < 256))
++		mono_atomic_inc_i64 (&jiterp_trace_bailout_counts[reason]);
+ }
+ 
+ EMSCRIPTEN_KEEPALIVE double
+@@ -503,7 +502,7 @@ mono_jiterp_get_trace_bailout_count (int reason)
+ 	if (reason > 255)
+ 		return -1;
+ 
+-	int64_t result = jiterp_trace_bailout_counts[reason];
++	gint64 result = mono_atomic_load_i64 (&jiterp_trace_bailout_counts[reason]);
+ 	return (double)result;
+ }
+ 
+@@ -514,8 +513,34 @@ mono_jiterp_adjust_abort_count (MintOpcode opcode, gint32 delta) {
+ 	if ((opcode < 0) || (opcode >= MINT_LASTOP))
+ 		return 0;
+ 	if (delta != 0)
+-		jiterpreter_abort_counts[opcode] += delta;
+-	return jiterpreter_abort_counts[opcode];
++		return mono_atomic_add_i32 (&jiterpreter_abort_counts[opcode], delta);
++	return mono_atomic_load_i32 (&jiterpreter_abort_counts[opcode]);
++}
++
++int
++mono_jiterp_record_interp_entry_hit (void *_rmethod)
++{
++	InterpMethod *rmethod = (InterpMethod *)_rmethod;
++
++	if (!rmethod)
++		return 0;
++
++	return mono_atomic_inc_i32 (&rmethod->jiterp_interp_entry_hit_count);
++}
++
++EMSCRIPTEN_KEEPALIVE JiterpEntryData *
++mono_jiterp_alloc_entry_data (void *rmethod, int params_count)
++{
++	JiterpEntryData *data = g_new0 (JiterpEntryData, 1);
++	data->header.rmethod = (InterpMethod *)rmethod;
++	data->header.params_count = params_count;
++	return data;
++}
++
++EMSCRIPTEN_KEEPALIVE void
++mono_jiterp_free_entry_data (JiterpEntryData *data)
++{
++	g_free (data);
+ }
+ 
+ // at the start of a jitted interp_entry wrapper, this is called to perform initial setup
+@@ -536,32 +561,15 @@ mono_jiterp_interp_entry_prologue (JiterpEntryData *data, void *this_arg)
+ 
+ 	// Is this method MulticastDelegate.Invoke?
+ 	if (rmethod->is_invoke) {
+-		// Copy the current state of the cache before using it
+-		JiterpEntryDataCache cache = data->cache;
+-		if (this_arg && (cache.delegate_invoke_is_for == (MonoDelegate*)this_arg)) {
+-			// We previously cached the invoke for this delegate
+-			data->header.rmethod = rmethod = cache.delegate_invoke_rmethod;
+-		} else {
+-			/*
+-			* This happens when AOT code for the invoke wrapper is not found.
+-			* Have to replace the method with the wrapper here, since the wrapper depends on the delegate.
+-			*/
+-			MonoDelegate *del = (MonoDelegate*)this_arg;
+-			MonoMethod *method = mono_marshal_get_delegate_invoke (rmethod->method, del);
+-			data->header.rmethod = rmethod = mono_interp_get_imethod (method);
+-
+-			// Cache the delegate invoke. This works because data was allocated statically
+-			//  when the jitted trampoline was created, so it will stick around.
+-			// FIXME: Thread safety
+-			data->cache.delegate_invoke_is_for = NULL;
+-			data->cache.delegate_invoke = method;
+-			data->cache.delegate_invoke_rmethod = rmethod;
+-			data->cache.delegate_invoke_is_for = del;
+-		}
++		/*
++		 * This happens when AOT code for the invoke wrapper is not found.
++		 * Have to replace the method with the wrapper here, since the wrapper depends on the delegate.
++		 */
++		MonoDelegate *del = (MonoDelegate*)this_arg;
++		MonoMethod *method = mono_marshal_get_delegate_invoke (rmethod->method, del);
++		data->header.rmethod = rmethod = mono_interp_get_imethod (method);
+ 	}
+ 
+-	// FIXME: Thread safety
+-
+ 	if (rmethod->needs_thread_attach)
+ 		data->header.orig_domain = mono_threads_attach_coop (mono_domain_get (), &data->header.attach_cookie);
+ 	else
+@@ -674,8 +682,7 @@ should_generate_trace_here (InterpBasicBlock *bb) {
+ 		for (InterpInst *ins = bb->first_ins; ins != NULL; ins = ins->next) {
+ 			int value = jiterp_get_opcode_value(ins, &inside_branch_block);
+ 			if (value < 0) {
+-				// FIXME: Harmless race condition if threads are in use
+-				jiterpreter_abort_counts[ins->opcode]++;
++				mono_atomic_inc_i32 (&jiterpreter_abort_counts[ins->opcode]);
+ 				return current_trace_value >= mono_opt_jiterpreter_minimum_trace_value;
+ 			} else if (value >= VALUE_SIMD) {
+ 				// HACK
+@@ -697,9 +704,9 @@ should_generate_trace_here (InterpBasicBlock *bb) {
+ 
+ typedef struct {
+ 	// 64-bits because it can get very high if estimate heat is turned on
+-	gint64 hit_count;
+-	JiterpreterThunk thunk;
+-	int penalty_total;
++	volatile gint64 hit_count;
++	volatile gpointer thunk;
++	volatile gint32 penalty_total;
+ } TraceInfo;
+ 
+ // The maximum number of trace segments used to store TraceInfo. This limits
+@@ -708,8 +715,8 @@ typedef struct {
+ #define TRACE_SEGMENT_SIZE 1024
+ 
+ static volatile gint32 trace_count = 0;
+-static TraceInfo *trace_segments[MAX_TRACE_SEGMENTS] = { NULL };
+-static gint32 traces_rejected = 0;
++static TraceInfo * volatile trace_segments[MAX_TRACE_SEGMENTS] = { NULL };
++static volatile gint32 traces_rejected = 0;
+ 
+ static TraceInfo *
+ trace_info_allocate_segment (gint32 index) {
+@@ -717,19 +724,12 @@ trace_info_allocate_segment (gint32 index) {
+ 
+ 	TraceInfo *segment = (TraceInfo *)g_malloc0 (sizeof(TraceInfo) * TRACE_SEGMENT_SIZE);
+ 
+-#ifdef DISABLE_THREADS
+-	trace_segments[index] = segment;
+-	return segment;
+-#else
+-	TraceInfo *expected = NULL;
+-	static_assert (sizeof(atomic_uintptr_t) == sizeof(trace_segments[index]) && ATOMIC_POINTER_LOCK_FREE == 2, "");
+-	if (!atomic_compare_exchange_strong ((atomic_uintptr_t *)&trace_segments[index], (uintptr_t *)&expected, (uintptr_t)segment)) {
++	if (mono_atomic_cas_ptr ((volatile gpointer *)&trace_segments[index], segment, NULL) != NULL) {
+ 		g_free (segment);
+-		return expected;
+-	} else {
+-		return segment;
++		return (TraceInfo *)mono_atomic_load_ptr ((volatile gpointer *)&trace_segments[index]);
+ 	}
+-#endif
++
++	return segment;
+ }
+ 
+ static TraceInfo *
+@@ -740,7 +740,7 @@ trace_info_get (gint32 index) {
+ 
+ 	g_assert (segment_index < MAX_TRACE_SEGMENTS);
+ 
+-	TraceInfo *segment = trace_segments[segment_index];
++	TraceInfo *segment = (TraceInfo *)mono_atomic_load_ptr ((volatile gpointer *)&trace_segments[segment_index]);
+ 	if (!segment)
+ 		segment = trace_info_allocate_segment (segment_index);
+ 
+@@ -749,12 +749,7 @@ trace_info_get (gint32 index) {
+ 
+ static gint32
+ trace_info_alloc () {
+-#ifdef DISABLE_THREADS
+-	gint32 index = trace_count++;
+-#else
+-	static_assert (sizeof(atomic_int) == sizeof(trace_count) && ATOMIC_INT_LOCK_FREE == 2, "");
+-	gint32 index = atomic_fetch_add ((atomic_int *)&trace_count, 1);
+-#endif
++	gint32 index = mono_atomic_fetch_add_i32 (&trace_count, 1);
+ 	gint32 limit = (MAX_TRACE_SEGMENTS * TRACE_SEGMENT_SIZE);
+ 	// Make sure we're not out of space in the trace info table.
+ 	if (index == limit)
+@@ -763,8 +758,9 @@ trace_info_alloc () {
+ 		return -1;
+ 
+ 	TraceInfo *info = trace_info_get (index);
+-	info->hit_count = 0;
+-	info->thunk = NULL;
++	mono_atomic_store_i64 (&info->hit_count, 0);
++	mono_atomic_store_ptr ((volatile gpointer *)&info->thunk, NULL);
++	mono_atomic_store_i32 (&info->penalty_total, 0);
+ 	return index;
+ }
+ 
+@@ -902,7 +898,7 @@ jiterp_insert_entry_points (void *_imethod, void *_td)
+ 
+ EMSCRIPTEN_KEEPALIVE double
+ mono_jiterp_get_trace_hit_count (gint32 trace_index) {
+-	return trace_info_get (trace_index)->hit_count;
++	return (double)mono_atomic_load_i64 (&trace_info_get (trace_index)->hit_count);
+ }
+ 
+ MONO_NEVER_INLINE JiterpreterThunk
+@@ -922,15 +918,11 @@ mono_interp_tier_prepare_jiterpreter_fast (
+ 	TraceInfo *trace_info = trace_info_get (trace_index);
+ 	g_assert (trace_info);
+ 
+-	if (trace_info->thunk)
+-		return trace_info->thunk;
++	JiterpreterThunk existing_thunk = (JiterpreterThunk)mono_atomic_load_ptr ((volatile gpointer *)&trace_info->thunk);
++	if (existing_thunk)
++		return existing_thunk;
+ 
+-#ifdef DISABLE_THREADS
+-	gint64 count = trace_info->hit_count++;
+-#else
+-	static_assert (sizeof(atomic_llong) == sizeof(trace_info->hit_count) && ATOMIC_LLONG_LOCK_FREE == 2, "");
+-	gint64 count = atomic_fetch_add ((atomic_llong *)&trace_info->hit_count, 1);
+-#endif
++	gint64 count = mono_atomic_fetch_add_i64 (&trace_info->hit_count, 1);
+ 
+ 	if (count == mono_opt_jiterpreter_minimum_trace_hit_count) {
+ 		JiterpreterThunk result = mono_interp_tier_prepare_jiterpreter (
+@@ -938,7 +930,11 @@ mono_interp_tier_prepare_jiterpreter_fast (
+ 			start_of_body, size_of_body, frame->imethod->is_verbose,
+ 			0
+ 		);
+-		trace_info->thunk = result;
++		if (result) {
++			gpointer winner = mono_atomic_cas_ptr ((volatile gpointer *)&trace_info->thunk, result, NULL);
++			if (winner)
++				return (JiterpreterThunk)winner;
++		}
+ 		return result;
+ 	} else {
+ 		// Hit count not reached, or already reached but compilation is not done yet
+@@ -1295,13 +1291,13 @@ mono_jiterp_modify_counter (int counter, double delta) {
+ 	long actual_delta = (long)(delta * JITERP_COUNTER_UNIT);
+ 	long *counter_address = mono_jiterp_get_counter_address (counter);
+ 
+-#ifdef DISABLE_THREADS
++	#ifdef DISABLE_THREADS
+ 	long actual_result = *counter_address;
+ 	*counter_address = actual_result + actual_delta;
+-#else
+-	static_assert (sizeof(counter_address) == sizeof(atomic_long) && ATOMIC_LONG_LOCK_FREE == 2, "");
++	#else
++	static_assert (sizeof(*counter_address) == sizeof(atomic_long) && ATOMIC_LONG_LOCK_FREE == 2, "");
+ 	long actual_result = atomic_fetch_add ((atomic_long *)counter_address, actual_delta);
+-#endif
++	#endif
+ 
+ 	return ((double)actual_result) / JITERP_COUNTER_UNIT;
+ }
+@@ -1350,7 +1346,7 @@ mono_jiterp_monitor_trace (const guint16 *ip, void *_frame, void *locals)
+ 	TraceInfo *info = trace_info_get (opcode->trace_index);
+ 	g_assert (info);
+ 
+-	JiterpreterThunk thunk = info->thunk;
++	JiterpreterThunk thunk = (JiterpreterThunk)mono_atomic_load_ptr ((volatile gpointer *)&info->thunk);
+ 	// FIXME: This shouldn't be possible
+ 	g_assert (((guint32)(void *)thunk) > JITERPRETER_NOT_JITTED);
+ 
+@@ -1371,31 +1367,20 @@ mono_jiterp_monitor_trace (const guint16 *ip, void *_frame, void *locals)
+ 			/ (mono_opt_jiterpreter_trace_monitoring_long_distance - mono_opt_jiterpreter_trace_monitoring_short_distance);
+ 		int penalty = MIN ((int)((1.0f - scaled) * TRACE_PENALTY_LIMIT), TRACE_PENALTY_LIMIT);
+ 
+-#ifdef DISABLE_THREADS
+-		info->penalty_total += penalty;
+-#else
+-		static_assert (sizeof(info->penalty_total) == sizeof(atomic_int) && ATOMIC_INT_LOCK_FREE == 2, "");
+-		atomic_fetch_add ((atomic_int *)&info->penalty_total, penalty);
+-#endif
++		mono_atomic_fetch_add_i32 (&info->penalty_total, penalty);
+ 
+ 		if (mono_opt_jiterpreter_trace_monitoring_log > 2)
+ 			g_print ("trace #%d @%d '%s' bailout recorded at opcode #%d, penalty=%d\n", opcode->trace_index, ip, frame->imethod->method->name, cinfo.bailout_opcode_count, penalty);
+ 	}
+ 
+-#ifdef DISABLE_THREADS
+-	gint64 hit_count = info->hit_count - mono_opt_jiterpreter_minimum_trace_hit_count;
+-	info->hit_count += 1;
+-#else
+-	static_assert (sizeof(atomic_llong) == sizeof(info->hit_count) && ATOMIC_LLONG_LOCK_FREE == 2, "");
+-	gint64 hit_count = atomic_fetch_add ((atomic_llong *)&info->hit_count, 1) - mono_opt_jiterpreter_minimum_trace_hit_count;
+-#endif
++	gint64 hit_count = mono_atomic_fetch_add_i64 (&info->hit_count, 1) - mono_opt_jiterpreter_minimum_trace_hit_count;
+ 
+ 	if (hit_count == mono_opt_jiterpreter_trace_monitoring_period) {
+ 		// Disable the monitoring point while we prepare to patch it
+ 		// This should never fail since we increment the hit count atomically
+ 		g_assert (mono_jiterp_patch_opcode (opcode, MINT_TIER_MONITOR_JITERPRETER, MINT_TIER_NOP_JITERPRETER));
+ 
+-		float average_penalty = info->penalty_total / (float)hit_count / 100.0f,
++		float average_penalty = mono_atomic_load_i32 (&info->penalty_total) / (float)hit_count / 100.0f,
+ 			threshold = (mono_opt_jiterpreter_trace_monitoring_max_average_penalty / 100.0f);
+ 
+ 		if (average_penalty <= threshold) {
+@@ -1403,22 +1388,21 @@ mono_jiterp_monitor_trace (const guint16 *ip, void *_frame, void *locals)
+ 				g_error ("thunk ptr %d below start of trace table %d\n", thunk, mono_jiterp_first_trace_fn_ptr);
+ 			guint16 new_relative_fn_ptr = (int)thunk - mono_jiterp_first_trace_fn_ptr;
+ 
+-#ifdef DISABLE_THREADS
++	#ifdef DISABLE_THREADS
+ 			g_assert (opcode->relative_fn_ptr == 0);
+ 			opcode->relative_fn_ptr = new_relative_fn_ptr;
+-#else
++	#else
+ 			guint16 zero = 0;
+ 			// atomically patch the relative fn ptr inside the opcode.
+ 			static_assert (sizeof(atomic_ushort) == sizeof(opcode->relative_fn_ptr) && ATOMIC_SHORT_LOCK_FREE == 2, "");
+ 			g_assert (atomic_compare_exchange_strong ((atomic_ushort *)&opcode->relative_fn_ptr, &zero, new_relative_fn_ptr));
+-#endif
++	#endif
+ 			g_assert (mono_jiterp_patch_opcode (opcode, MINT_TIER_NOP_JITERPRETER, MINT_TIER_ENTER_JITERPRETER));
+ 
+ 			if (mono_opt_jiterpreter_trace_monitoring_log > 1)
+ 				g_print ("trace #%d @%d '%s' accepted; average_penalty %f <= %f\n", opcode->trace_index, ip, frame->imethod->method->name, average_penalty, threshold);
+ 		} else {
+-			// FIXME: Harmless race condition if threads are in use
+-			traces_rejected++;
++			mono_atomic_inc_i32 (&traces_rejected);
+ 			if (mono_opt_jiterpreter_trace_monitoring_log > 0) {
+ 				char * full_name = mono_method_get_full_name (frame->imethod->method);
+ 				g_print ("trace #%d @%d '%s' rejected; average_penalty %f > %f\n", opcode->trace_index, ip, full_name, average_penalty, threshold);
+@@ -1433,7 +1417,7 @@ mono_jiterp_monitor_trace (const guint16 *ip, void *_frame, void *locals)
+ EMSCRIPTEN_KEEPALIVE gint32
+ mono_jiterp_get_rejected_trace_count ()
+ {
+-	return traces_rejected;
++	return mono_atomic_load_i32 (&traces_rejected);
+ }
+ 
+ EMSCRIPTEN_KEEPALIVE void
+@@ -1449,18 +1433,14 @@ mono_jiterp_boost_back_branch_target (const JiterpreterOpcode *ip) {
+ 	// We need to make sure we don't boost the hit count too high, because if we do
+ 	//  it will increment past the compile threshold and never compile
+ 	int limit = mono_opt_jiterpreter_minimum_trace_hit_count - 1;
+-	gint64 old_hit_count = trace_info->hit_count,
++	gint64 old_hit_count = mono_atomic_load_i64 (&trace_info->hit_count),
+ 		new_hit_count = MIN (limit, old_hit_count + mono_opt_jiterpreter_back_branch_boost);
+ 	if (new_hit_count <= old_hit_count)
+ 		return;
+ 
+ 	// Atomically update the hit count. We may lose a race here, but that's not a big
+ 	//  problem since losing the race indicates that the trace entry point is probably hot.
+-#ifdef DISABLE_THREADS
+-	trace_info->hit_count = new_hit_count;
+-#else
+ 	mono_atomic_cas_i64 (&trace_info->hit_count, new_hit_count, old_hit_count);
+-#endif
+ }
+ 
+ EMSCRIPTEN_KEEPALIVE int
+@@ -1486,7 +1466,7 @@ atomically_set_value_once (gint32 *address, gint32 value) {
+ 	*address = value;
+ #else
+ 	gint32 expected = 0;
+-	static_assert (sizeof(atomic_int) == sizeof(address) && ATOMIC_INT_LOCK_FREE == 2, "");
++	static_assert (sizeof(atomic_int) == sizeof(*address) && ATOMIC_INT_LOCK_FREE == 2, "");
+ 	if (atomic_compare_exchange_strong ((atomic_int *)address, &expected, value))
+ 		return;
+ 	if (expected == value)
+@@ -1553,7 +1533,7 @@ mono_jiterp_increment_counter (volatile int *counter) {
+ 	*counter = result + 1;
+ 	return result;
+ #else
+-	static_assert (sizeof (atomic_int) == sizeof(counter) && ATOMIC_INT_LOCK_FREE == 2, "");
++	static_assert (sizeof (atomic_int) == sizeof(*counter) && ATOMIC_INT_LOCK_FREE == 2, "");
+ 	return atomic_fetch_add ((atomic_int *)counter, 1);
+ #endif
+ }
+diff --git a/src/mono/mono/mini/interp/jiterpreter.h b/src/mono/mono/mini/interp/jiterpreter.h
+index 078e10d77fa..5c2fd5ec17f 100644
+--- a/src/mono/mono/mini/interp/jiterpreter.h
++++ b/src/mono/mono/mini/interp/jiterpreter.h
+@@ -3,11 +3,7 @@
+ 
+ #ifdef HOST_BROWSER
+ 
+-#ifdef DISABLE_THREADS
+ #define JITERPRETER_ENABLE_JIT_CALL_TRAMPOLINES 1
+-#else
+-#define JITERPRETER_ENABLE_JIT_CALL_TRAMPOLINES 0
+-#endif // DISABLE_THREADS
+ 
+ // mono_interp_tier_prepare_jiterpreter will return these special values if it doesn't
+ //  have a function pointer for a specific entry point.
+@@ -113,7 +109,10 @@ void
+ mono_jiterp_register_jit_call_thunk (void *cinfo, WasmJitCallThunk thunk);
+ 
+ extern void
+-mono_interp_record_interp_entry (void *fn_ptr);
++mono_interp_record_interp_entry (void *fn_ptr, int hit_count);
++
++int
++mono_jiterp_record_interp_entry_hit (void *rmethod);
+ 
+ // jiterpreter-interp-entry.ts
+ // HACK: Pass void* so that this header can include safely in files without definition for InterpMethod
+@@ -175,27 +174,18 @@ typedef struct {
+ 	int params_count;
+ } JiterpEntryDataHeader;
+ 
+-// we optimize delegate calls by attempting to cache the delegate invoke
+-//  target - this will improve performance when the same delegate is invoked
+-//  repeatedly inside a loop
+-typedef struct {
+-	MonoDelegate *delegate_invoke_is_for;
+-	MonoMethod *delegate_invoke;
+-	InterpMethod *delegate_invoke_rmethod;
+-} JiterpEntryDataCache;
+-
+ // jitted interp_entry wrappers use custom tracking data structures
+ //  that are allocated in the heap, one per wrapper
+-// FIXME: For thread safety we need to make these thread-local or stack-allocated
+-// Note that if we stack allocate these the cache will need to move somewhere else
+ typedef struct {
+-	// We split the cache out from the important data so that when
+-	//  jiterp_interp_entry copies the important data it doesn't have
+-	//  to also copy the cache. This reduces overhead slightly
+ 	JiterpEntryDataHeader header;
+-	JiterpEntryDataCache cache;
+ } JiterpEntryData;
+ 
++JiterpEntryData *
++mono_jiterp_alloc_entry_data (void *rmethod, int params_count);
++
++void
++mono_jiterp_free_entry_data (JiterpEntryData *data);
++
+ volatile size_t *
+ mono_jiterp_get_polling_required_address (void);
+ 
+diff --git a/src/mono/mono/utils/options-def.h b/src/mono/mono/utils/options-def.h
+index 5f865543d17..5a662fee9a0 100644
+--- a/src/mono/mono/utils/options-def.h
++++ b/src/mono/mono/utils/options-def.h
+@@ -85,9 +85,9 @@ DEFINE_BOOL(wasm_gc_safepoints, "wasm-gc-safepoints", FALSE, "Use GC safepoints
+ // traces_enabled controls whether the jiterpreter will JIT individual interpreter opcode traces
+ DEFINE_BOOL(jiterpreter_traces_enabled, "jiterpreter-traces-enabled", TRUE, "JIT interpreter opcode traces into WASM")
+ // interp_entry_enabled controls whether specialized interp_entry wrappers will be jitted
+-DEFINE_BOOL_READONLY(jiterpreter_interp_entry_enabled, "jiterpreter-interp-entry-enabled", FALSE, "JIT specialized WASM interp_entry wrappers")
++DEFINE_BOOL_READONLY(jiterpreter_interp_entry_enabled, "jiterpreter-interp-entry-enabled", TRUE, "JIT specialized WASM interp_entry wrappers")
+ // jit_call_enabled controls whether do_jit_call will use specialized trampolines for hot call sites
+-DEFINE_BOOL_READONLY(jiterpreter_jit_call_enabled, "jiterpreter-jit-call-enabled", FALSE, "JIT specialized WASM do_jit_call trampolines")
++DEFINE_BOOL_READONLY(jiterpreter_jit_call_enabled, "jiterpreter-jit-call-enabled", TRUE, "JIT specialized WASM do_jit_call trampolines")
+ 
+ DEFINE_BOOL_READONLY(wasm_gc_safepoints, "wasm-gc-safepoints", TRUE, "Use GC safepoints on WASM")
+ #endif // DISABLE_THREADS
