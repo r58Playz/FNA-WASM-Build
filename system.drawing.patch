@@ -1,11 +1,5 @@
-diff --git a/external/corefx b/external/corefx
---- a/external/corefx
-+++ b/external/corefx
-@@ -1 +1 @@
--Subproject commit c4eeab9fc2faa0195a812e552cd73ee298d39386
-+Subproject commit c4eeab9fc2faa0195a812e552cd73ee298d39386-dirty
 diff --git a/mcs/class/System.Drawing/System.Drawing/Font.cs b/mcs/class/System.Drawing/System.Drawing/Font.cs
-index 29d11922..bf940434 100644
+index 29d1192204c..bf940434971 100644
 --- a/mcs/class/System.Drawing/System.Drawing/Font.cs
 +++ b/mcs/class/System.Drawing/System.Drawing/Font.cs
 @@ -219,7 +219,7 @@ public static Font FromHfont (IntPtr hfont)
@@ -36,7 +30,7 @@ index 29d11922..bf940434 100644
  						// reset to original values
  						Marshal.PtrToStructure (copy, logFont);
 diff --git a/mcs/class/System.Drawing/System.Drawing/Graphics.cs b/mcs/class/System.Drawing/System.Drawing/Graphics.cs
-index b94c0b00..04e19562 100644
+index b94c0b00766..04e19562319 100644
 --- a/mcs/class/System.Drawing/System.Drawing/Graphics.cs
 +++ b/mcs/class/System.Drawing/System.Drawing/Graphics.cs
 @@ -1737,7 +1737,7 @@ public static Graphics FromHwnd (IntPtr hwnd)
@@ -67,8 +61,153 @@ index b94c0b00..04e19562 100644
  			return new Graphics (graphics);
  		}
  
+diff --git a/mcs/class/System.Drawing/System.Drawing/Image.cs b/mcs/class/System.Drawing/System.Drawing/Image.cs
+index 30ae8311b27..688bbcf774a 100644
+--- a/mcs/class/System.Drawing/System.Drawing/Image.cs
++++ b/mcs/class/System.Drawing/System.Drawing/Image.cs
+@@ -270,43 +270,70 @@ internal static IntPtr InitFromStream (Stream stream)
+ 
+ 		IntPtr imagePtr;
+ 		Status st;
+-		
+-		// Seeking required
+-		if (!stream.CanSeek) {
+-			byte[] buffer = new byte[256];
+-			int index = 0;
+-			int count;
+-
+-			do {
+-				if (buffer.Length < index + 256) {
+-					byte[] newBuffer = new byte[buffer.Length * 2];
+-					Array.Copy(buffer, newBuffer, buffer.Length);
+-					buffer = newBuffer;
+-				}
+-				count = stream.Read(buffer, index, 256);
+-				index += count;
+-			}
+-			while (count != 0);
+-
+-			stream = new MemoryStream(buffer, 0, index);
+-		}
+ 
+ 		if (GDIPlus.RunningOnUnix ()) {
+-			// Unix, with libgdiplus
+-			// We use a custom API for this, because there's no easy way
+-			// to get the Stream down to libgdiplus.  So, we wrap the stream
+-			// with a set of delegates.
+-			GDIPlus.GdiPlusStreamHelper sh = new GDIPlus.GdiPlusStreamHelper (stream, true);
+-
+-			st = GDIPlus.GdipLoadImageFromDelegate_linux (sh.GetHeaderDelegate, sh.GetBytesDelegate,
+-				sh.PutBytesDelegate, sh.SeekDelegate, sh.CloseDelegate, sh.SizeDelegate, out imagePtr);
++			// Fully read the stream into a managed byte array, then pass a pinned
++			// pointer to libgdiplus.  This avoids passing managed delegates as
++			// function pointers, which is not supported on mono-wasm.
++			byte[] bytes = ReadStreamFully (stream);
++			GCHandle pin = GCHandle.Alloc (bytes, GCHandleType.Pinned);
++			try {
++				st = GDIPlus.GdipLoadImageFromBuffer (pin.AddrOfPinnedObject (), bytes.Length, out imagePtr);
++			} finally {
++				pin.Free ();
++			}
+ 		} else {
++			// Windows path: IStream-based (unchanged).
++			if (!stream.CanSeek) {
++				byte[] buffer = new byte[256];
++				int index = 0;
++				int count;
++				do {
++					if (buffer.Length < index + 256) {
++						byte[] newBuffer = new byte[buffer.Length * 2];
++						Array.Copy (buffer, newBuffer, buffer.Length);
++						buffer = newBuffer;
++					}
++					count = stream.Read (buffer, index, 256);
++					index += count;
++				}
++				while (count != 0);
++				stream = new MemoryStream (buffer, 0, index);
++			}
+ 			st = GDIPlus.GdipLoadImageFromStream (new ComIStreamWrapper (stream), out imagePtr);
+ 		}
+ 
+ 		return st == Status.Ok ? imagePtr : IntPtr.Zero;
+ 	}
+ 
++	// Reads all remaining bytes from a stream into a trimmed byte array.
++	private static byte[] ReadStreamFully (Stream stream)
++	{
++		// Fast path: MemoryStream — grab its buffer directly if possible.
++		MemoryStream ms = stream as MemoryStream;
++		if (ms != null) {
++			return ms.ToArray ();
++		}
++
++		byte[] buffer = new byte[4096];
++		int index = 0;
++		int count;
++		do {
++			if (buffer.Length < index + 4096) {
++				byte[] newBuffer = new byte[buffer.Length * 2];
++				Array.Copy (buffer, newBuffer, index);
++				buffer = newBuffer;
++			}
++			count = stream.Read (buffer, index, 4096);
++			index += count;
++		}
++		while (count != 0);
++
++		byte[] result = new byte[index];
++		Array.Copy (buffer, result, index);
++		return result;
++	}
++
+ 	// non-static	
+ 	public RectangleF GetBounds (ref GraphicsUnit pageUnit)
+ 	{	
+@@ -488,11 +515,26 @@ public void Save(Stream stream, ImageCodecInfo encoder, EncoderParameters encode
+ 
+ 		try {
+ 			if (GDIPlus.RunningOnUnix ()) {
+-				GDIPlus.GdiPlusStreamHelper sh = new GDIPlus.GdiPlusStreamHelper (stream, false);
+-				st = GDIPlus.GdipSaveImageToDelegate_linux (nativeObject, sh.GetBytesDelegate, sh.PutBytesDelegate,
+-					sh.SeekDelegate, sh.CloseDelegate, sh.SizeDelegate, ref guid, nativeEncoderParams);
++				// Ask libgdiplus to encode into a native buffer, then copy it into
++				// the managed stream.  No managed delegates are passed across the
++				// P/Invoke boundary, which is required for mono-wasm.
++				IntPtr outBuf;
++				int outSize;
++				st = GDIPlus.GdipSaveImageToBuffer (nativeObject, ref guid, nativeEncoderParams,
++					out outBuf, out outSize);
++				try {
++					GDIPlus.CheckStatus (st);
++					if (outSize > 0) {
++						byte[] managed = new byte[outSize];
++						Marshal.Copy (outBuf, managed, 0, outSize);
++						stream.Write (managed, 0, outSize);
++					}
++				} finally {
++					GDIPlus.GdipFreeBuffer (outBuf);
++				}
++				return;
+ 			} else {
+-				st = GDIPlus.GdipSaveImageToStream (new HandleRef (this, nativeObject), 
++				st = GDIPlus.GdipSaveImageToStream (new HandleRef (this, nativeObject),
+ 					new ComIStreamWrapper (stream), ref guid, new HandleRef (encoderParams, nativeEncoderParams));
+ 			}
+ 		}
+@@ -500,8 +542,8 @@ public void Save(Stream stream, ImageCodecInfo encoder, EncoderParameters encode
+ 			if (nativeEncoderParams != IntPtr.Zero)
+ 				Marshal.FreeHGlobal (nativeEncoderParams);
+ 		}
+-		
+-		GDIPlus.CheckStatus (st);		
++
++		GDIPlus.CheckStatus (st);
+ 	}
+ 	
+ 	public void SaveAdd (EncoderParameters encoderParams)
 diff --git a/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs b/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
-index fe5a455f..83fed1ed 100644
+index fe5a455f798..f476aa5c1a6 100644
 --- a/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
 +++ b/mcs/class/System.Drawing/System.Drawing/gdipFunctions.cs
 @@ -54,7 +54,7 @@ internal partial class Gdip : GDIPlus
@@ -133,7 +272,7 @@ index fe5a455f..83fed1ed 100644
  
  
  		// Some special X11 stuff
-@@ -1946,15 +1946,11 @@ public StreamSizeDelegate SizeDelegate {
+@@ -1946,26 +1946,22 @@ public StreamSizeDelegate SizeDelegate {
  		}
  
  		/* Mac only function calls */
@@ -144,8 +283,25 @@ index fe5a455f..83fed1ed 100644
  		[DllImport(GdiPlus)]
  		internal static extern Status GdipSetVisibleClip_linux (IntPtr graphics, ref Rectangle rect);
  
--		[DllImport(GdiPlus)]
--		internal static extern Status GdipCreateFromXDrawable_linux (IntPtr drawable, IntPtr display, out IntPtr graphics);
- 
- 		// Stream functions for non-Win32 (libgdiplus specific)
++
++		// Buffer-based image I/O (no managed function pointers; safe for mono-wasm)
  		[DllImport(GdiPlus)]
+-		internal static extern Status GdipCreateFromXDrawable_linux (IntPtr drawable, IntPtr display, out IntPtr graphics);
++		static internal extern Status GdipLoadImageFromBuffer (IntPtr buffer, int size, out IntPtr image);
+ 
+-		// Stream functions for non-Win32 (libgdiplus specific)
+ 		[DllImport(GdiPlus)]
+-		static internal extern Status GdipLoadImageFromDelegate_linux (StreamGetHeaderDelegate getHeader,
+-			StreamGetBytesDelegate getBytes, StreamPutBytesDelegate putBytes, StreamSeekDelegate doSeek,
+-			StreamCloseDelegate close, StreamSizeDelegate size, out IntPtr image);
++		static internal extern Status GdipSaveImageToBuffer (IntPtr image, ref Guid encoderClsID,
++			IntPtr encoderParameters, out IntPtr outBuffer, out int outSize);
+ 
+ 		[DllImport(GdiPlus)]
+-		static internal extern Status GdipSaveImageToDelegate_linux (IntPtr image, StreamGetBytesDelegate getBytes,
+-			StreamPutBytesDelegate putBytes, StreamSeekDelegate doSeek, StreamCloseDelegate close,
+-			StreamSizeDelegate size, ref Guid encoderClsID, IntPtr encoderParameters);
++		static internal extern void GdipFreeBuffer (IntPtr buffer);
+ 
+ 		[DllImport(GdiPlus)]
+ 		static internal extern Status GdipCreateMetafileFromDelegate_linux (StreamGetHeaderDelegate getHeader,

@@ -1,0 +1,183 @@
+diff --git a/src/image.c b/src/image.c
+index a89e463..f2dc89e 100644
+--- a/src/image.c
++++ b/src/image.c
+@@ -2343,6 +2343,162 @@ GdipSaveImageToDelegate_linux (GpImage *image, GetBytesDelegate getBytesFunc, Pu
+ 	}
+ }
+ 
++/* ---------- buffer-based image I/O (WASM-safe, no managed function pointers) ---------- */
++
++typedef struct {
++	const BYTE *data;
++	int size;
++	int pos;
++} BufReadCtx;
++
++typedef struct {
++	BYTE  *data;
++	int    size;
++	int    capacity;
++	int    pos;
++} BufWriteCtx;
++
++static BufReadCtx  g_buf_read_ctx;
++static BufWriteCtx g_buf_write_ctx;
++
++/* --- read-side callbacks --- */
++static int
++buf_get_header (BYTE *buf, int bufsz)
++{
++	int n = g_buf_read_ctx.size - g_buf_read_ctx.pos;
++	if (n > bufsz) n = bufsz;
++	if (buf && n > 0)
++		memcpy (buf, g_buf_read_ctx.data + g_buf_read_ctx.pos, n);
++	return n;
++}
++
++static int
++buf_get_bytes (BYTE *buf, int bufsz, BOOL peek)
++{
++	int n = g_buf_read_ctx.size - g_buf_read_ctx.pos;
++	if (n > bufsz) n = bufsz;
++	if (buf && n > 0)
++		memcpy (buf, g_buf_read_ctx.data + g_buf_read_ctx.pos, n);
++	if (!peek)
++		g_buf_read_ctx.pos += n;
++	return n;
++}
++
++static long
++buf_seek (int offset, int whence)
++{
++	switch (whence) {
++	case 0: g_buf_read_ctx.pos = offset; break;
++	case 1: g_buf_read_ctx.pos += offset; break;
++	case 2: g_buf_read_ctx.pos = g_buf_read_ctx.size + offset; break;
++	}
++	if (g_buf_read_ctx.pos < 0) g_buf_read_ctx.pos = 0;
++	if (g_buf_read_ctx.pos > g_buf_read_ctx.size) g_buf_read_ctx.pos = g_buf_read_ctx.size;
++	return g_buf_read_ctx.pos;
++}
++
++static int  buf_put_bytes_noop (BYTE *buf, int bufsz) { return 0; }
++static void buf_close_noop (void) {}
++static long buf_read_size (void) { return g_buf_read_ctx.size; }
++
++/* --- write-side callbacks --- */
++static int
++out_put_bytes (BYTE *buf, int bufsz)
++{
++	int needed = g_buf_write_ctx.pos + bufsz;
++	if (needed > g_buf_write_ctx.capacity) {
++		int new_cap = g_buf_write_ctx.capacity == 0 ? 65536 : g_buf_write_ctx.capacity;
++		while (new_cap < needed) new_cap *= 2;
++		BYTE *new_data = GdipAlloc (new_cap);
++		if (!new_data) return -1;
++		if (g_buf_write_ctx.data) {
++			memcpy (new_data, g_buf_write_ctx.data, g_buf_write_ctx.size);
++			GdipFree (g_buf_write_ctx.data);
++		}
++		g_buf_write_ctx.data     = new_data;
++		g_buf_write_ctx.capacity = new_cap;
++	}
++	memcpy (g_buf_write_ctx.data + g_buf_write_ctx.pos, buf, bufsz);
++	g_buf_write_ctx.pos += bufsz;
++	if (g_buf_write_ctx.pos > g_buf_write_ctx.size)
++		g_buf_write_ctx.size = g_buf_write_ctx.pos;
++	return bufsz;
++}
++
++static long
++out_seek (int offset, int whence)
++{
++	switch (whence) {
++	case 0: g_buf_write_ctx.pos = offset; break;
++	case 1: g_buf_write_ctx.pos += offset; break;
++	case 2: g_buf_write_ctx.pos = g_buf_write_ctx.size + offset; break;
++	}
++	if (g_buf_write_ctx.pos < 0)                        g_buf_write_ctx.pos = 0;
++	if (g_buf_write_ctx.pos > g_buf_write_ctx.capacity) g_buf_write_ctx.pos = g_buf_write_ctx.capacity;
++	return g_buf_write_ctx.pos;
++}
++
++static int  out_get_bytes_noop (BYTE *buf, int bufsz, BOOL peek) { return 0; }
++static void out_close_noop (void) {}
++static long out_write_size (void) { return g_buf_write_ctx.size; }
++
++/* --- public API --- */
++
++GpStatus WINGDIPAPI
++GdipLoadImageFromBuffer (const BYTE *buffer, int size, GpImage **image)
++{
++	if (!buffer || size <= 0 || !image)
++		return InvalidParameter;
++
++	g_buf_read_ctx.data = buffer;
++	g_buf_read_ctx.size = size;
++	g_buf_read_ctx.pos  = 0;
++
++	return GdipLoadImageFromDelegate_linux (
++		buf_get_header, buf_get_bytes, buf_put_bytes_noop,
++		buf_seek, buf_close_noop, buf_read_size, image);
++}
++
++GpStatus WINGDIPAPI
++GdipSaveImageToBuffer (GpImage *image, GDIPCONST CLSID *encoderCLSID,
++	GDIPCONST EncoderParameters *params, BYTE **outBuffer, int *outSize)
++{
++	GpStatus st;
++
++	if (!image || !encoderCLSID || !outBuffer || !outSize)
++		return InvalidParameter;
++
++	g_buf_write_ctx.data     = NULL;
++	g_buf_write_ctx.size     = 0;
++	g_buf_write_ctx.capacity = 0;
++	g_buf_write_ctx.pos      = 0;
++
++	st = GdipSaveImageToDelegate_linux (
++		image, out_get_bytes_noop, out_put_bytes,
++		out_seek, out_close_noop, out_write_size,
++		encoderCLSID, params);
++
++	if (st == Ok) {
++		*outBuffer = g_buf_write_ctx.data;
++		*outSize   = g_buf_write_ctx.size;
++	} else {
++		if (g_buf_write_ctx.data)
++			GdipFree (g_buf_write_ctx.data);
++		*outBuffer = NULL;
++		*outSize   = 0;
++	}
++	return st;
++}
++
++void WINGDIPAPI
++GdipFreeBuffer (BYTE *buffer)
++{
++	if (buffer)
++		GdipFree (buffer);
++}
++
++/* ---------------------------------------------------------------------- */
++
+ GpStatus
+ initCodecList (void)
+ {
+diff --git a/src/image.h b/src/image.h
+index d108ff8..b4b00d9 100644
+--- a/src/image.h
++++ b/src/image.h
+@@ -50,6 +50,11 @@ GpStatus WINGDIPAPI GdipSaveImageToDelegate_linux (GpImage *image, GetBytesDeleg
+ 	SeekDelegate seekFunc, CloseDelegate closeFunc, SizeDelegate sizeFunc, GDIPCONST CLSID *encoderCLSID,
+ 	GDIPCONST EncoderParameters *params);
+ 
++/* Buffer-based image I/O (no managed function pointers; safe for mono-wasm) */
++GpStatus WINGDIPAPI GdipLoadImageFromBuffer (const BYTE *buffer, int size, GpImage **image);
++GpStatus WINGDIPAPI GdipSaveImageToBuffer (GpImage *image, GDIPCONST CLSID *encoderCLSID,
++	GDIPCONST EncoderParameters *params, BYTE **outBuffer, int *outSize);
++void WINGDIPAPI GdipFreeBuffer (BYTE *buffer);
+ 
+ /* GDI+ exported Image functions */
+ GpStatus WINGDIPAPI GdipLoadImageFromStream (void /*IStream*/ *stream, GpImage **image);

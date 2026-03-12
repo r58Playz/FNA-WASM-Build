@@ -517,6 +517,7 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/mono/libgdiplus
           cd libgdiplus
+          git apply $GITHUB_WORKSPACE/libgdiplus.patch
           autoreconf -fiv
           CFLAGS=$PTHREAD_FLAGS emconfigure ./configure \
             --host=wasm32-unknown-emscripten \
