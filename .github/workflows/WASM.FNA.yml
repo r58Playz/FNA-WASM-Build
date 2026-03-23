@@ -184,7 +184,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt -y update
-          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers
+          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers ripgrep
       - name: Verify
         run: emcc -v
       - name: LibA
@@ -211,14 +211,22 @@ jobs:
           THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
           ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=$THREADS_FLAG -c Release
           7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
+      - name: Freeze emsdk
+        if: matrix.pthread_enabled == true
+        shell: bash
+        run: |
+          ./freeze-emsdk.sh ./liba/runtime/src/mono/browser/emsdk ./emsdk-frozen.zip
       - name: Copy Binaries (dotnet)
         shell: bash
         run: |
-          mkdir Binaries
+          mkdir -p Binaries
           PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
           cp ./liba/liba.o Binaries/${PREFIX}liba.o
           cp ./liba/hot_reload_detour.o Binaries/${PREFIX}hot_reload_detour.o
           cp ./liba/runtime.zip Binaries/${PREFIX}dotnet.zip
+          if [[ ${{ matrix.pthread_enabled == true && 'a' || 'b' }} == "a" ]]; then
+            cp ./emsdk-frozen.zip Binaries/${PREFIX}emsdk.zip
+          fi
       - name: Archive Dotnet (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:

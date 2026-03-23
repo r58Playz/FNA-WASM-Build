@@ -29,3 +29,15 @@ This fork contains a few patches (and uses SDL3 as the base):
 
 Go to the Actions tab and download the .zip artifact from the latest workflow run.  
 ~~See for further details:  https://gist.github.com/TheSpydog/e94c8c23c01615a5a3b2cc1a0857415c~~ (out of date)
+
+## Frozen emsdk artifact
+
+The workflow also produces `emsdk-frozen.zip` (pthread=true build). This archive is a frozen copy of
+`src/mono/browser/emsdk` from the patched runtime build, including dotnet-style `emsdk_env` and `.emscripten`
+configuration. It is intended for consumers that need emsdk behavior to match dotnet runtime packaging.
+
+For local generation after building runtime in `liba/runtime`:
+
+```bash
+./freeze-emsdk.sh ./liba/runtime ./Binaries/emsdk-frozen.zip
+```
