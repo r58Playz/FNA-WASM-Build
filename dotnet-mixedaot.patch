@@ -1,0 +1,253 @@
+diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
+index 4ca33a8b7e6..95beadf580d 100644
+--- a/src/mono/mono/mini/interp/interp.c
++++ b/src/mono/mono/mini/interp/interp.c
+@@ -2027,6 +2027,20 @@ imethod_to_ftnptr (InterpMethod *imethod, gboolean need_unbox)
+ 			ftndesc_p = &imethod->ftndesc;
+ 		if (!*ftndesc_p) {
+ 			MonoFtnDesc *ftndesc = mini_llvmonly_load_method_ftndesc (imethod->method, FALSE, need_unbox, error);
++
++#ifdef HOST_WASM
++			if (!is_ok (error) || !ftndesc) {
++				/*
++				 * In llvmonly+aot-only mode we can fail to materialize an interp-in wrapper
++				 * for signatures we didn't AOT. Keep a descriptor carrying interp_method so
++				 * interpreter-only call paths (calli/delegate metadata) can still resolve
++				 * back to InterpMethod without hard-aborting.
++				 */
++				mono_interp_error_cleanup (error);
++				ftndesc = mini_llvmonly_create_ftndesc (imethod->method, NULL, NULL);
++			}
++#endif
++
+ 			mono_error_assert_ok (error);
+ 			if (need_unbox)
+ 				ftndesc->interp_method = INTERP_IMETHOD_TAG_UNBOX (imethod);
+@@ -3234,7 +3248,8 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
+ 	MonoMethod *method;
+ 	MonoMethodSignature *sig;
+ 	CallContext *ccontext = (CallContext*) ccontext_untyped;
+-	InterpMethod *rmethod = (InterpMethod*) rmethod_untyped;
++	gboolean unbox = INTERP_IMETHOD_IS_TAGGED_UNBOX (rmethod_untyped);
++	InterpMethod *rmethod = INTERP_IMETHOD_UNTAG_UNBOX (rmethod_untyped);
+ 	gpointer orig_domain = NULL, attach_cookie;
+ 	int i;
+ 
+@@ -3263,6 +3278,11 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
+ 	/* Copy the args saved in the trampoline to the frame stack */
+ 	gpointer retp = mono_arch_get_native_call_context_args (ccontext, &frame, sig, call_info);
+ 
++	if (unbox) {
++		g_assert (sig->hasthis);
++		frame.stack->data.p = mono_object_unbox_internal ((MonoObject*)frame.stack->data.p);
++	}
++
+ #ifdef MONO_ARCH_HAVE_SWIFTCALL
+ 	int swift_error_arg_index = -1;
+ 	gpointer swift_error_data;
+@@ -3428,9 +3448,11 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
+ 		wrapper = mini_get_gsharedvt_in_sig_wrapper (sig);
+ 
+ 	entry_wrapper = mono_jit_compile_method_jit_only (wrapper, error);
+-	mono_error_assertf_ok (error, "couldn't compile wrapper \"%s\" for \"%s\"",
+-			mono_method_get_name_full (wrapper, TRUE, TRUE, MONO_TYPE_NAME_FORMAT_IL),
+-			mono_method_get_name_full (method,  TRUE, TRUE, MONO_TYPE_NAME_FORMAT_IL));
++	if (!is_ok (error)) {
++		mono_error_cleanup (error);
++		error_init_reuse (error);
++		entry_wrapper = NULL;
++	}
+ 
+ 	if (sig->param_count > MAX_INTERP_ENTRY_ARGS) {
+ 		entry_func = (gpointer)interp_entry_general;
+@@ -3467,6 +3489,75 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
+ 	}
+ #endif
+ 
++	if (!entry_wrapper) {
++		mono_interp_error_cleanup (error);
++
++#ifdef HOST_WASM
++		if (sig->param_count > MAX_INTERP_ENTRY_ARGS) {
++			entry_wrapper = mono_jit_compile_method_jit_only (mini_get_interp_in_wrapper (sig), error);
++			if (!is_ok (error)) {
++				mono_error_cleanup (error);
++				error_init_reuse (error);
++				entry_wrapper = NULL;
++			}
++		}
++
++		if (!entry_wrapper && !mono_method_has_unmanaged_callers_only_attribute (method)) {
++			entry_wrapper = mono_jit_compile_method_jit_only (mini_get_interp_lmf_wrapper ("mono_interp_entry_from_trampoline", (gpointer) mono_interp_entry_from_trampoline), error);
++			if (!is_ok (error)) {
++				mono_error_cleanup (error);
++				error_init_reuse (error);
++				entry_wrapper = NULL;
++			}
++			if (entry_wrapper)
++				entry_func = (gpointer)interp_entry_from_trampoline;
++		}
++
++		if (entry_wrapper)
++			goto have_entry_wrapper;
++#endif
++
++#ifdef MONO_ARCH_HAVE_INTERP_ENTRY_TRAMPOLINE
++		if (!mono_native_to_interp_trampoline) {
++			if (mono_aot_only) {
++				mono_native_to_interp_trampoline = (MonoFuncV)mono_aot_get_trampoline ("native_to_interp_trampoline");
++			} else {
++				MonoTrampInfo *info;
++				mono_native_to_interp_trampoline = (MonoFuncV)mono_arch_get_native_to_interp_trampoline (&info);
++				mono_tramp_info_register (info, NULL);
++			}
++		}
++		entry_wrapper = (gpointer)mono_native_to_interp_trampoline;
++
++		/* Match the normal interp fallback path to preserve thread/LMF semantics. */
++		if (sig->pinvoke) {
++			entry_func = (gpointer)interp_entry_from_trampoline;
++		} else {
++			static gpointer cached_func = NULL;
++			if (!cached_func) {
++				cached_func = mono_jit_compile_method_jit_only (mini_get_interp_lmf_wrapper ("mono_interp_entry_from_trampoline", (gpointer) mono_interp_entry_from_trampoline), error);
++				if (!is_ok (error)) {
++					mono_error_cleanup (error);
++					error_init_reuse (error);
++					cached_func = (gpointer)interp_entry_from_trampoline;
++				} else {
++					mono_memory_barrier ();
++				}
++			}
++			entry_func = cached_func;
++		}
++#else
++		char *wrapper_name = mono_method_get_name_full (wrapper, TRUE, TRUE, MONO_TYPE_NAME_FORMAT_IL);
++		char *method_name = mono_method_get_name_full (method, TRUE, TRUE, MONO_TYPE_NAME_FORMAT_IL);
++		mono_error_set_execution_engine (error, "couldn't compile wrapper \"%s\" for \"%s\"", wrapper_name, method_name);
++		g_free (wrapper_name);
++		g_free (method_name);
++		return NULL;
++#endif
++	}
++
++have_entry_wrapper:
++
+ 	/* Encode unbox in the lower bit of imethod */
+ 	gpointer entry_arg = imethod;
+ 	if (unbox)
+diff --git a/src/mono/mono/mini/llvmonly-runtime.c b/src/mono/mono/mini/llvmonly-runtime.c
+index 92b8c65ece7..f1960364737 100644
+--- a/src/mono/mono/mini/llvmonly-runtime.c
++++ b/src/mono/mono/mini/llvmonly-runtime.c
+@@ -28,6 +28,18 @@ mini_llvmonly_load_method (MonoMethod *method, gboolean caller_gsharedvt, gboole
+ 	if (addr) {
+ 		return mini_llvmonly_add_method_wrappers (method, (gpointer)addr, caller_gsharedvt, need_unbox, out_arg);
+ 	} else {
++
++#ifdef HOST_WASM
++		if (method->wrapper_type == MONO_WRAPPER_NATIVE_TO_MANAGED) {
++			addr = mini_get_interp_callbacks ()->create_method_pointer (method, TRUE, error);
++			return_val_if_nok (error, NULL);
++			if (addr) {
++				*out_arg = NULL;
++				return addr;
++			}
++		}
++#endif
++
+ 		MonoFtnDesc *desc = mini_get_interp_callbacks ()->create_method_pointer_llvmonly (method, need_unbox, error);
+ 		return_val_if_nok (error, NULL);
+ 		*out_arg = desc->arg;
+@@ -50,6 +62,16 @@ mini_llvmonly_load_method_ftndesc (MonoMethod *method, gboolean caller_gsharedvt
+ 		// FIXME: Cache this
+ 		return mini_llvmonly_create_ftndesc (method, addr, arg);
+ 	} else {
++
++#ifdef HOST_WASM
++		if (method->wrapper_type == MONO_WRAPPER_NATIVE_TO_MANAGED) {
++			addr = mini_get_interp_callbacks ()->create_method_pointer (method, TRUE, error);
++			return_val_if_nok (error, NULL);
++			if (addr)
++				return mini_llvmonly_create_ftndesc (method, addr, NULL);
++		}
++#endif
++
+ 		MonoFtnDesc *ftndesc = mini_get_interp_callbacks ()->create_method_pointer_llvmonly (method, need_unbox, error);
+ 		return_val_if_nok (error, NULL);
+ 		return ftndesc;
+@@ -72,6 +94,18 @@ mini_llvmonly_load_method_delegate (MonoMethod *method, gboolean caller_gsharedv
+ 		*out_arg = mini_llvmonly_get_delegate_arg (method, addr);
+ 		return addr;
+ 	} else {
++
++#ifdef HOST_WASM
++		if (method->wrapper_type == MONO_WRAPPER_NATIVE_TO_MANAGED) {
++			addr = mini_get_interp_callbacks ()->create_method_pointer (method, TRUE, error);
++			return_val_if_nok (error, NULL);
++			if (addr) {
++				*out_arg = NULL;
++				return addr;
++			}
++		}
++#endif
++
+ 		MonoFtnDesc *desc = mini_get_interp_callbacks ()->create_method_pointer_llvmonly (method, need_unbox, error);
+ 		return_val_if_nok (error, NULL);
+ 
+diff --git a/src/mono/mono/mini/mini-exceptions.c b/src/mono/mono/mini/mini-exceptions.c
+index 1a689f34a82..1b6da7eeb67 100644
+--- a/src/mono/mono/mini/mini-exceptions.c
++++ b/src/mono/mono/mini/mini-exceptions.c
+@@ -1473,7 +1473,7 @@ mono_get_frame_info (gint32 skip,
+ 
+ 	g_assert (skip >= 0);
+ 
+-	if (mono_llvm_only) {
++	if (mono_llvm_only && mono_aot_mode != MONO_AOT_MODE_LLVMONLY_INTERP) {
+ 		GSList *l, *ips;
+ 		guint8 *frame_ip = NULL;
+ 
+@@ -1529,6 +1529,16 @@ mono_get_frame_info (gint32 skip,
+ 
+ 				/* The skip count passed by the caller depends on us not filtering out MANAGED_TO_NATIVE */
+ 				jmethod = jinfo_get_method (ji);
++				if (jmethod->wrapper_type != MONO_WRAPPER_NONE && jmethod->wrapper_type != MONO_WRAPPER_DYNAMIC_METHOD && jmethod->wrapper_type != MONO_WRAPPER_MANAGED_TO_NATIVE)
++					continue;
++				skip--;
++				break;
++			case FRAME_TYPE_IL_STATE:
++				ji = frame.ji;
++				*native_offset = frame.native_offset;
++				jmethod = frame.method;
++				il_offset = ((MonoMethodILState*)frame.il_state)->il_offset;
++
+ 				if (jmethod->wrapper_type != MONO_WRAPPER_NONE && jmethod->wrapper_type != MONO_WRAPPER_DYNAMIC_METHOD && jmethod->wrapper_type != MONO_WRAPPER_MANAGED_TO_NATIVE)
+ 					continue;
+ 				skip--;
+@@ -1538,7 +1548,7 @@ mono_get_frame_info (gint32 skip,
+ 			}
+ 		} while (skip >= 0);
+ 
+-		if (frame.type == FRAME_TYPE_INTERP) {
++		if (frame.type == FRAME_TYPE_INTERP || frame.type == FRAME_TYPE_IL_STATE) {
+ 			jmethod = frame.method;
+ 			actual_method = frame.actual_method;
+ 		} else {
+diff --git a/src/mono/mono/mini/mini-runtime.c b/src/mono/mono/mini/mini-runtime.c
+index 94f6b03dd3c..3121209f98a 100644
+--- a/src/mono/mono/mini/mini-runtime.c
++++ b/src/mono/mono/mini/mini-runtime.c
+@@ -2702,6 +2702,12 @@ mono_jit_compile_method_with_opt (MonoMethod *method, guint32 opt, gboolean jit_
+ 
+ 	if (mono_ee_features.force_use_interpreter && !jit_only)
+ 		use_interp = TRUE;
++
++#ifdef HOST_WASM
++	if (!jit_only && mono_use_interpreter && method->wrapper_type == MONO_WRAPPER_NATIVE_TO_MANAGED)
++		use_interp = TRUE;
++#endif
++
+ 	if (!use_interp && mono_interp_only_classes) {
+ 		for (GSList *l = mono_interp_only_classes; l; l = l->next) {
+ 			if (!strcmp (m_class_get_name (method->klass), (char*)l->data))
