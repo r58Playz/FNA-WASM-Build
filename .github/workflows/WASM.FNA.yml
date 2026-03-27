@@ -9,6 +9,7 @@ env:
   DOTNET_RUNTIME_VERSION: v10.0.3
   EMSDK_VERSION: 3.1.56
   ZLIB_VERSION: v1.3.1
+  LIBJPEG_TURBO_VERSION: 3.0.3
   LIBPNG_VERSION: v1.6.43
   FREETYPE_VERSION: VER-2-13-3
   FONTCONFIG_VERSION: "2.15.0"
@@ -323,6 +324,20 @@ jobs:
           cp zconf.h ../zlib.h $WASM_PREFIX/include/
           mkdir -p $WASM_PREFIX/lib/pkgconfig
           cp zlib.pc $WASM_PREFIX/lib/pkgconfig/
+      - name: libjpeg-turbo
+        shell: bash
+        run: |
+          git clone --depth=1 -b ${{ env.LIBJPEG_TURBO_VERSION }} https://github.com/libjpeg-turbo/libjpeg-turbo
+          cd libjpeg-turbo && mkdir build && cd build
+          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
+            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_SHARED=FALSE \
+            -DENABLE_STATIC=TRUE \
+            -DWITH_SIMD=FALSE \
+            -DWITH_JPEG8=TRUE
+          emmake make -j$(nproc)
+          emmake make install
       - name: libpng
         shell: bash
         run: |
@@ -536,7 +551,7 @@ jobs:
             --without-libexif \
             --with-libtiff=no \
             --with-libgif=no \
-            --with-libjpeg=no \
+            --with-libjpeg=yes \
             PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
             PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig"
           emmake make -C src -j$(nproc)
@@ -566,6 +581,7 @@ jobs:
           cp $WASM_PREFIX/lib/libfreetype.a Binaries/${PREFIX}libfreetype.a
           cp $WASM_PREFIX/lib/libfontconfig.a Binaries/${PREFIX}libfontconfig.a
           cp $WASM_PREFIX/lib/libpng16.a Binaries/${PREFIX}libpng16.a
+          cp $WASM_PREFIX/lib/libjpeg.a Binaries/${PREFIX}libjpeg.a
           cp $WASM_PREFIX/lib/libz.a Binaries/${PREFIX}libz.a
           cp $WASM_PREFIX/lib/libexpat.a Binaries/${PREFIX}libexpat.a
           cp $WASM_PREFIX/lib/libglib-2.0.a Binaries/${PREFIX}libglib-2.0.a
