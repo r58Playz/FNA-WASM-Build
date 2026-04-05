@@ -1,5 +1,5 @@
 diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
-index 4ca33a8b7e6..95beadf580d 100644
+index 87af394e8af..2051c6224e0 100644
 --- a/src/mono/mono/mini/interp/interp.c
 +++ b/src/mono/mono/mini/interp/interp.c
 @@ -2027,6 +2027,20 @@ imethod_to_ftnptr (InterpMethod *imethod, gboolean need_unbox)
@@ -23,7 +23,7 @@ index 4ca33a8b7e6..95beadf580d 100644
  			mono_error_assert_ok (error);
  			if (need_unbox)
  				ftndesc->interp_method = INTERP_IMETHOD_TAG_UNBOX (imethod);
-@@ -3234,7 +3248,8 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
+@@ -3231,7 +3245,8 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
  	MonoMethod *method;
  	MonoMethodSignature *sig;
  	CallContext *ccontext = (CallContext*) ccontext_untyped;
@@ -33,7 +33,7 @@ index 4ca33a8b7e6..95beadf580d 100644
  	gpointer orig_domain = NULL, attach_cookie;
  	int i;
  
-@@ -3263,6 +3278,11 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
+@@ -3260,6 +3275,11 @@ interp_entry_from_trampoline (gpointer ccontext_untyped, gpointer rmethod_untype
  	/* Copy the args saved in the trampoline to the frame stack */
  	gpointer retp = mono_arch_get_native_call_context_args (ccontext, &frame, sig, call_info);
  
@@ -45,7 +45,7 @@ index 4ca33a8b7e6..95beadf580d 100644
  #ifdef MONO_ARCH_HAVE_SWIFTCALL
  	int swift_error_arg_index = -1;
  	gpointer swift_error_data;
-@@ -3428,9 +3448,11 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
+@@ -3425,9 +3445,11 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
  		wrapper = mini_get_gsharedvt_in_sig_wrapper (sig);
  
  	entry_wrapper = mono_jit_compile_method_jit_only (wrapper, error);
@@ -60,7 +60,7 @@ index 4ca33a8b7e6..95beadf580d 100644
  
  	if (sig->param_count > MAX_INTERP_ENTRY_ARGS) {
  		entry_func = (gpointer)interp_entry_general;
-@@ -3467,6 +3489,75 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
+@@ -3464,6 +3486,75 @@ interp_create_method_pointer_llvmonly (MonoMethod *method, gboolean unbox, MonoE
  	}
  #endif
  
@@ -235,7 +235,7 @@ index 1a689f34a82..1b6da7eeb67 100644
  			actual_method = frame.actual_method;
  		} else {
 diff --git a/src/mono/mono/mini/mini-runtime.c b/src/mono/mono/mini/mini-runtime.c
-index 94f6b03dd3c..3121209f98a 100644
+index 94f6b03dd3c..299f36c0279 100644
 --- a/src/mono/mono/mini/mini-runtime.c
 +++ b/src/mono/mono/mini/mini-runtime.c
 @@ -2702,6 +2702,12 @@ mono_jit_compile_method_with_opt (MonoMethod *method, guint32 opt, gboolean jit_
@@ -251,3 +251,13 @@ index 94f6b03dd3c..3121209f98a 100644
  	if (!use_interp && mono_interp_only_classes) {
  		for (GSList *l = mono_interp_only_classes; l; l = l->next) {
  			if (!strcmp (m_class_get_name (method->klass), (char*)l->data))
+@@ -3557,6 +3563,9 @@ mono_jit_runtime_invoke (MonoMethod *method, void *obj, void **params, MonoObjec
+ 			use_interp = TRUE;
+ 
+ 		if (callee) {
++			if (mono_llvm_only && (callee->iflags & METHOD_IMPL_ATTRIBUTE_SYNCHRONIZED))
++				callee = mono_marshal_get_synchronized_wrapper (callee);
++
+ 			compiled_method = mono_jit_compile_method_jit_only (callee, error);
+ 			if (!compiled_method) {
+ 				if (!mono_opt_llvm_emulate_unwind)

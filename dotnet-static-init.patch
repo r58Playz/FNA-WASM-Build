@@ -51,10 +51,10 @@ index 7065b6fe85f..3c8a60a7d0f 100644
  	/* g_print ("Finalize run on %p %s.%s\n", o, mono_object_class (o)->name_space, mono_object_class (o)->name); */
  
 diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
-index cfa161b000d..469960299c4 100644
+index 3cb587fdd08..2051c6224e0 100644
 --- a/src/mono/mono/mini/interp/interp.c
 +++ b/src/mono/mono/mini/interp/interp.c
-@@ -5991,7 +5991,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+@@ -6082,7 +6082,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
  		}
  		MINT_IN_CASE(MINT_NEWOBJ) {
  			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [4]];
@@ -65,7 +65,7 @@ index cfa161b000d..469960299c4 100644
  			guint16 imethod_index = ip [3];
  			return_offset = ip [1];
  			call_args_offset = ip [2];
-@@ -6015,7 +6017,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+@@ -6106,7 +6108,9 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
  		}
  		MINT_IN_CASE(MINT_NEWOBJ_INLINED) {
  			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [2]];
@@ -76,11 +76,20 @@ index cfa161b000d..469960299c4 100644
  
  			// FIXME push/pop LMF
  			MonoObject *o = mono_gc_alloc_obj (vtable, m_class_get_instance_size (vtable->klass));
+@@ -6155,7 +6159,7 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+ 
+ 			// FIXME push/pop LMF
+ 			MonoVTable *vtable = mono_class_vtable_checked (newobj_class, error);
+-			if (!is_ok (error) || !mono_runtime_class_init_full (vtable, error)) {
++			if (!is_ok (error) || (!mono_class_is_before_field_init (vtable->klass) && !mono_runtime_class_init_full (vtable, error))) {
+ 				MonoException *exc = interp_error_convert_to_exception (frame, error, ip);
+ 				g_assert (exc);
+ 				THROW_EX (exc, ip);
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 27497780aad..02416e0059d 100644
+index ac27358d3eb..3fa9b97e3f3 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -3003,6 +3003,39 @@ is_metadata_update_disabled (void)
+@@ -3005,6 +3005,39 @@ is_metadata_update_disabled (void)
  	return disabled;
  }
  
@@ -120,7 +129,7 @@ index 27497780aad..02416e0059d 100644
  static gboolean
  interp_method_check_inlining (TransformData *td, MonoMethod *method, MonoMethodSignature *csignature)
  {
-@@ -4865,6 +4898,8 @@ interp_emit_ldsflda (TransformData *td, MonoClassField *field, MonoError *error)
+@@ -4867,6 +4900,8 @@ interp_emit_ldsflda (TransformData *td, MonoClassField *field, MonoError *error)
  
  	push_simple_type (td, STACK_TYPE_MP);
  	if (mono_class_field_is_special_static (field)) {
@@ -129,7 +138,7 @@ index 27497780aad..02416e0059d 100644
  		guint32 offset = GPOINTER_TO_UINT (mono_special_static_field_get_offset (field, error));
  		mono_error_assert_ok (error);
  		g_assert (offset);
-@@ -4943,6 +4978,8 @@ interp_emit_sfld_access (TransformData *td, MonoClassField *field, MonoClass *fi
+@@ -4945,6 +4980,8 @@ interp_emit_sfld_access (TransformData *td, MonoClassField *field, MonoClass *fi
  	}
  
  	if (mono_class_field_is_special_static (field)) {
@@ -138,7 +147,7 @@ index 27497780aad..02416e0059d 100644
  		guint32 offset = GPOINTER_TO_UINT (mono_special_static_field_get_offset (field, error));
  		mono_error_assert_ok (error);
  		g_assert (offset && (offset & 0x80000000) == 0);
-@@ -10034,7 +10071,7 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
+@@ -10036,7 +10073,7 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Mon
  	method_class_vt = mono_class_vtable_checked (imethod->method->klass, error);
  	return_if_nok (error);
  
@@ -191,7 +200,7 @@ index f4e661edd4e..1fc3d1e7c79 100644
  				thread_ins = mono_create_tls_get (cfg, TLS_KEY_THREAD);
  			else
 diff --git a/src/mono/mono/mini/mini-runtime.c b/src/mono/mono/mini/mini-runtime.c
-index 7cf63847ff6..94f6b03dd3c 100644
+index cb8e2f1a9ef..3121209f98a 100644
 --- a/src/mono/mono/mini/mini-runtime.c
 +++ b/src/mono/mono/mini/mini-runtime.c
 @@ -1558,16 +1558,16 @@ mono_resolve_patch_target_ext (MonoMemoryManager *mem_manager, MonoMethod *metho
@@ -236,7 +245,7 @@ index 7cf63847ff6..94f6b03dd3c 100644
  static gpointer
  mono_jit_compile_method_with_opt (MonoMethod *method, guint32 opt, gboolean jit_only, MonoError *error)
  {
-@@ -2747,8 +2754,10 @@ lookup_start:
+@@ -2753,8 +2760,10 @@ lookup_start:
  		if (!is_ok (error))
  			return NULL;
  		g_assert (vtable);
@@ -249,7 +258,7 @@ index 7cf63847ff6..94f6b03dd3c 100644
  
  		code = MINI_ADDR_TO_FTNPTR (info->code_start);
  		return mono_create_ftnptr (code);
-@@ -2779,8 +2788,10 @@ lookup_start:
+@@ -2785,8 +2794,10 @@ lookup_start:
  			if (!mono_llvm_only && !mono_class_is_open_constructed_type (m_class_get_byval_arg (method->klass))) {
  				vtable = mono_class_vtable_checked (method->klass, error);
  				mono_error_assert_ok (error);
@@ -262,7 +271,7 @@ index 7cf63847ff6..94f6b03dd3c 100644
  			}
  		}
  		if (!is_ok (error))
-@@ -2860,6 +2871,30 @@ lookup_start:
+@@ -2866,6 +2877,30 @@ lookup_start:
  	return p;
  }
  
@@ -293,7 +302,7 @@ index 7cf63847ff6..94f6b03dd3c 100644
  typedef struct {
  	MonoMethod *method;
  	guint32 opt;
-@@ -3563,10 +3598,12 @@ mono_jit_runtime_invoke (MonoMethod *method, void *obj, void **params, MonoObjec
+@@ -3569,10 +3604,12 @@ mono_jit_runtime_invoke (MonoMethod *method, void *obj, void **params, MonoObjec
  	 * We need this here because mono_marshal_get_runtime_invoke can place
  	 * the helper method in System.Object and not the target class.
  	 */
