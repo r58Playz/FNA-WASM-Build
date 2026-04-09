@@ -146,8 +146,21 @@ index c891daa7459..4ebc5f3cce2 100644
          }
  
          internal Module GetModule()
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
+index 91ba1108493..d9c134f9a63 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
+@@ -851,7 +851,7 @@ public override int GetHashCode()
+ 
+         public override bool IsDefined(Type attributeType, bool inherit)
+         {
+-            return base.IsDefined(attributeType, inherit);
++            return CustomAttribute.IsDefined(this, attributeType, inherit);
+         }
+ 
+         public override object[] GetCustomAttributes(bool inherit) => CustomAttribute.GetCustomAttributes(this, inherit);
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
-index 230c52dd304..874eaf8eca5 100644
+index 230c52dd304..0d6dbe5dec0 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
 @@ -41,6 +41,7 @@
@@ -158,7 +171,48 @@ index 230c52dd304..874eaf8eca5 100644
  
  namespace System.Reflection.Emit
  {
-@@ -1512,7 +1513,41 @@ internal override Type InternalResolve()
+@@ -674,6 +675,22 @@ private bool has_ctor_method()
+             return false;
+         }
+ 
++        private static bool TryTypeResolve(RuntimeTypeBuilder typeBuilder)
++        {
++            Debug.Assert(!typeBuilder.is_created);
++
++            string? fullName = typeBuilder.FullName;
++            if (fullName == null)
++                return false;
++
++            RuntimeAssembly? requestingAssembly = typeBuilder.Assembly as RuntimeAssembly;
++            if (requestingAssembly == null && typeBuilder.Assembly is AssemblyBuilder assemblyBuilder)
++                requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
++
++            _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
++            return typeBuilder.is_created;
++        }
++
+         // We require emitted types to have all members on their bases to be accessible.
+         // This is basically an identity function for `this`.
+         [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2083:UnrecognizedReflectionPattern",
+@@ -702,7 +719,7 @@ protected override TypeInfo CreateTypeInfoCore()
+                     if (!fb.IsStatic && (ft is RuntimeTypeBuilder builder) && ft.IsValueType && (ft != this) && is_nested_in(ft))
+                     {
+                         RuntimeTypeBuilder tb = builder;
+-                        if (!tb.is_created)
++                        if (!tb.is_created && !TryTypeResolve(tb))
+                         {
+                             throw new NotImplementedException();
+                         }
+@@ -747,7 +764,7 @@ protected override TypeInfo CreateTypeInfoCore()
+                         throw new BadImageFormatException();
+                     if (!iface.IsInterface)
+                         throw new TypeLoadException();
+-                    if (iface is RuntimeTypeBuilder builder && !builder.is_created)
++                    if (iface is RuntimeTypeBuilder builder && !builder.is_created && !TryTypeResolve(builder))
+                         throw new TypeLoadException();
+                 }
+             }
+@@ -1512,7 +1529,41 @@ internal override Type InternalResolve()
  
          internal override Type RuntimeResolve()
          {
@@ -317,9 +371,18 @@ index 94b86c74d72..17217b97704 100644
  	if (align)
  		*align = m_class_get_min_align (klass);
 diff --git a/src/mono/mono/metadata/sre.c b/src/mono/mono/metadata/sre.c
-index 47b303d86ba..90a5f9d4b90 100644
+index 47b303d86ba..6e5d2d65ebf 100644
 --- a/src/mono/mono/metadata/sre.c
 +++ b/src/mono/mono/metadata/sre.c
+@@ -1069,7 +1069,7 @@ mono_image_create_token (MonoDynamicImage *assembly, MonoObjectHandle obj,
+ 	int how_collide;
+ 	how_collide = MONO_DYN_IMAGE_TOK_SAME_OK;
+ 
+-	if (strcmp (klass->name, "RuntimeType") == 0) {
++	if (strcmp (klass->name, "RuntimeType") == 0 || strcmp (klass->name, "RuntimeTypeBuilder") == 0) {
+ 		MonoType *type = mono_reflection_type_handle_mono_type (MONO_HANDLE_CAST (MonoReflectionType, obj), error);
+ 		goto_if_nok (error, leave);
+ 		MonoClass *mc = mono_class_from_mono_type_internal (type);
 @@ -2639,6 +2639,8 @@ reflection_setup_internal_class_internal (MonoReflectionTypeBuilderHandle ref_tb
  		// If we failed to create the parent, fail the child
  		if (!parent_type)
