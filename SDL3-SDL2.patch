@@ -31,64 +31,11 @@ index 85ff587d3..274183a20 100644
  
  #endif // SDL_CAMERA_DRIVER_EMSCRIPTEN
 -
-diff --git a/src/joystick/emscripten/SDL_sysjoystick.c b/src/joystick/emscripten/SDL_sysjoystick.c
-index 42f12b033..2692134d5 100644
---- a/src/joystick/emscripten/SDL_sysjoystick.c
-+++ b/src/joystick/emscripten/SDL_sysjoystick.c
-@@ -35,7 +35,7 @@ static SDL_joylist_item *SDL_joylist = NULL;
- static SDL_joylist_item *SDL_joylist_tail = NULL;
- static int numjoysticks = 0;
- 
--EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
-+EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickVendor, (int device_index), {
-     // Let's assume that if we're calling these function then the gamepad object definitely exists
-     let gamepad = navigator['getGamepads']()[device_index];
- 
-@@ -55,7 +55,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickVendor, (int device_index), {
-     return 0;
- });
- 
--EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
-+EM_JS(int, SDL3_renamed_SDL_GetEmscriptenJoystickProduct, (int device_index), {
-     let gamepad = navigator['getGamepads']()[device_index];
- 
-     // Chrome, Edge, Opera: Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 09cc)
-@@ -74,7 +74,7 @@ EM_JS(int, SDL_GetEmscriptenJoystickProduct, (int device_index), {
-     return 0;
- });
- 
--EM_JS(int, SDL_IsEmscriptenJoystickXInput, (int device_index), {
-+EM_JS(int, SDL3_renamed_SDL_IsEmscriptenJoystickXInput, (int device_index), {
-     let gamepad = navigator['getGamepads']()[device_index];
- 
-     // Chrome, Edge, Opera: Xbox 360 Controller (XInput STANDARD GAMEPAD)
-@@ -104,9 +104,9 @@ static EM_BOOL Emscripten_JoyStickConnected(int eventType, const EmscriptenGamep
-     SDL_zerop(item);
-     item->index = gamepadEvent->index;
- 
--    vendor = SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
--    product = SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
--    is_xinput = SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
-+    vendor = SDL3_renamed_SDL_GetEmscriptenJoystickVendor(gamepadEvent->index);
-+    product = SDL3_renamed_SDL_GetEmscriptenJoystickProduct(gamepadEvent->index);
-+    is_xinput = SDL3_renamed_SDL_IsEmscriptenJoystickXInput(gamepadEvent->index);
- 
-     // Use a generic VID/PID representing an XInput controller
-     if (!vendor && !product && is_xinput) {
 diff --git a/src/main/emscripten/SDL_sysmain_runapp.c b/src/main/emscripten/SDL_sysmain_runapp.c
-index 0564240ac..559536bb9 100644
+index 5671c96ed..3b57f9bb4 100644
 --- a/src/main/emscripten/SDL_sysmain_runapp.c
 +++ b/src/main/emscripten/SDL_sysmain_runapp.c
-@@ -28,7 +28,7 @@
- 
- EM_JS_DEPS(sdlrunapp, "$dynCall,$stringToNewUTF8");
- 
--int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void * reserved)
-+int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void *reserved)
- {
-     (void)reserved;
- 
-@@ -46,11 +46,10 @@ int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void * reserv
+@@ -51,8 +51,8 @@ int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void * reserv
                      //console.log("Setting SDL env var '" + key + "' to '" + value + "' ...");
                      dynCall('iiii', $0, [ckey, cvalue, 1]);
                  }
@@ -97,12 +44,8 @@ index 0564240ac..559536bb9 100644
 +                _SDL3_renamed_Emscripten_force_free(ckey);  // these must use free(), not SDL_free()!
 +                _SDL3_renamed_Emscripten_force_free(cvalue);
              }
--        }
--    }, SDL_setenv_unsafe);
-+        } }, SDL_setenv_unsafe);
- 
-     return SDL_CallMainFunction(argc, argv, mainFunction);
- }
+         }
+     }, SDL_setenv_unsafe);
 diff --git a/src/stdlib/SDL_memcpy.c b/src/stdlib/SDL_memcpy.c
 index eb2c16044..30a5396b8 100644
 --- a/src/stdlib/SDL_memcpy.c
