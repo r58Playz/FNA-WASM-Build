@@ -1,77 +1,124 @@
-diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeConstructorBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeConstructorBuilder.Mono.cs
-index 603be1d0b1e..46e9782aaca 100644
---- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeConstructorBuilder.Mono.cs
-+++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeConstructorBuilder.Mono.cs
-@@ -156,7 +156,32 @@ internal override Type GetParameterType(int pos)
-             Justification = "Linker doesn't analyze RuntimeResolve but it's an identity function")]
-         internal MethodBase RuntimeResolve()
-         {
--            return type.RuntimeResolve().GetConstructor(this);
-+            Type resolvedType = type.RuntimeResolve();
-+            if (!mhandle.IsNullHandle())
-+            {
-+                MethodBase? resolved = GetMethodFromHandle(mhandle, resolvedType.TypeHandle);
-+                if (resolved != null && ReferenceEquals(resolved.DeclaringType, resolvedType))
-+                    return resolved;
-+            }
+diff --git a/src/libraries/System.Private.CoreLib/src/System/Runtime/Loader/AssemblyLoadContext.cs b/src/libraries/System.Private.CoreLib/src/System/Runtime/Loader/AssemblyLoadContext.cs
+index 9f9403738eb..6219facc89e 100644
+--- a/src/libraries/System.Private.CoreLib/src/System/Runtime/Loader/AssemblyLoadContext.cs
++++ b/src/libraries/System.Private.CoreLib/src/System/Runtime/Loader/AssemblyLoadContext.cs
+@@ -7,6 +7,9 @@
+ using System.Diagnostics.CodeAnalysis;
+ using System.IO;
+ using System.Reflection;
++#if MONO
++using System.Reflection.Emit;
++#endif
+ using System.Runtime.InteropServices;
+ using System.Security;
+ using System.Threading;
+@@ -33,6 +36,11 @@ private enum InternalState
+         private static Dictionary<long, WeakReference<AssemblyLoadContext>>? s_allContexts;
+         private static long s_nextId;
+ 
++#if MONO
++        [ThreadStatic]
++        private static HashSet<string>? t_typeBuilderResolveInProgress;
++#endif
 +
-+            Type[] parameterTypes;
-+            if (parameters == null || parameters.Length == 0)
-+            {
-+                parameterTypes = Type.EmptyTypes;
-+            }
-+            else
-+            {
-+                parameterTypes = new Type[parameters.Length];
-+                for (int i = 0; i < parameters.Length; ++i)
-+                    parameterTypes[i] = parameters[i].InternalResolve();
-+            }
-+
-+            const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
-+            ConstructorInfo? ctor = resolvedType.GetConstructor(Flags, binder: null, call_conv, parameterTypes, modifiers: null);
-+            if (ctor != null)
-+                return ctor;
-+
-+            throw new MissingMethodException(resolvedType.FullName, ConstructorInfo.ConstructorName);
+         [MemberNotNull(nameof(s_allContexts))]
+         private static Dictionary<long, WeakReference<AssemblyLoadContext>> AllContexts =>
+             s_allContexts ??
+@@ -244,6 +252,7 @@ public event Action<AssemblyLoadContext>? Unloading
+         // Occurs when resolution of type fails
+ #if MONO
+         [method: DynamicDependency(nameof(OnTypeResolve))]
++        [method: DynamicDependency(nameof(OnTypeBuilderResolve))]
+ #endif
+         internal static event ResolveEventHandler? TypeResolve;
+ 
+@@ -697,6 +706,34 @@ private static void OnAssemblyLoad(RuntimeAssembly assembly)
+             return InvokeResolveEvent(TypeResolve, assembly, typeName);
          }
  
-         public override object Invoke(object? obj, BindingFlags invokeAttr, Binder? binder, object?[]? parameters, CultureInfo? culture)
++#if MONO
++        // This method is called by the VM.
++        internal static RuntimeAssembly? OnTypeBuilderResolve(Assembly? requestingAssembly, RuntimeTypeBuilder typeBuilder)
++        {
++            string? typeName = typeBuilder.FullName;
++            if (typeName == null)
++                return null;
++
++            HashSet<string> inProgress = t_typeBuilderResolveInProgress ??= new HashSet<string>(StringComparer.Ordinal);
++            if (!inProgress.Add(typeName))
++                return null;
++
++            try
++            {
++                return InvokeResolveEvent(TypeResolve, GetRuntimeAssembly(requestingAssembly), typeName);
++            }
++            catch (Exception e)
++            {
++                System.IO.File.WriteAllText("/dev/stderr", $"[:3] OnTypeBuilderResolve FAILED! {typeBuilder} {e}");
++                throw;
++            }
++            finally
++            {
++                inProgress.Remove(typeName);
++            }
++        }
++#endif
++
+         // This method is called by the VM.
+         private static RuntimeAssembly? OnAssemblyResolve(RuntimeAssembly? assembly, string assemblyFullName)
+         {
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/ConstructorOnTypeBuilderInstantiation.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/ConstructorOnTypeBuilderInstantiation.Mono.cs
+index 948abec87d8..b699e360e4e 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/ConstructorOnTypeBuilderInstantiation.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/ConstructorOnTypeBuilderInstantiation.Mono.cs
+@@ -44,7 +44,7 @@ internal partial class ConstructorOnTypeBuilderInstantiation
+             Justification = "Reflection.Emit is not subject to trimming")]
+         internal ConstructorInfo RuntimeResolve()
+         {
+-            Type type = _type.InternalResolve();
++            Type type = RuntimeTypeBuilder.RuntimeResolveType(_type, _type.Assembly);
+             return type.GetConstructor(_ctor);
+         }
+ 
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/MethodOnTypeBuilderInstantiation.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/MethodOnTypeBuilderInstantiation.Mono.cs
+index 3219d0bedce..599c9ee4874 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/MethodOnTypeBuilderInstantiation.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/MethodOnTypeBuilderInstantiation.Mono.cs
+@@ -95,13 +95,15 @@ public override MethodInfo MakeGenericMethod(params Type[] typeArgs)
+                 "Callers of the outer calls to MakeGenericMethod will be warned as appropriate.")]
+         internal MethodInfo RuntimeResolve()
+         {
+-            Type type = _type.InternalResolve();
++            System.Reflection.Assembly? requestingAssembly = _type.Assembly;
++
++            Type type = RuntimeTypeBuilder.RuntimeResolveType(_type, requestingAssembly);
+             MethodInfo m = type.GetMethod(_method);
+             if (_typeArguments != null)
+             {
+                 var args = new Type[_typeArguments.Length];
+                 for (int i = 0; i < _typeArguments.Length; ++i)
+-                    args[i] = _typeArguments[i].InternalResolve();
++                    args[i] = RuntimeTypeBuilder.RuntimeResolveType(_typeArguments[i], requestingAssembly);
+                 m = m.MakeGenericMethod(args);
+             }
+             return m;
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeFieldBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeFieldBuilder.Mono.cs
-index 2bf9bf01df3..d36c744f6a8 100644
+index 2bf9bf01df3..a1b45e20b20 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeFieldBuilder.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeFieldBuilder.Mono.cs
-@@ -251,11 +251,26 @@ internal void ResolveUserTypes()
-                 marshal_info.marshaltyperef = RuntimeTypeBuilder.ResolveUserType(marshal_info.marshaltyperef);
-         }
+@@ -253,9 +253,7 @@ internal void ResolveUserTypes()
  
-+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2075:UnrecognizedReflectionPattern",
-+            Justification = "Linker doesn't analyze RuntimeResolve but it's an identity function")]
          internal FieldInfo RuntimeResolve()
          {
 -            // typeb.CreateType() populates this.handle
 -            var type_handle = new RuntimeTypeHandle((typeb.CreateType() as RuntimeType)!);
 -            return GetFieldFromHandle(handle, type_handle);
-+            Type resolvedType = typeb.RuntimeResolve();
-+            RuntimeType runtimeType = (RuntimeType)resolvedType;
-+
-+            if (!handle.IsNullHandle())
-+            {
-+                FieldInfo resolved = GetFieldFromHandle(handle, runtimeType.TypeHandle);
-+                if (ReferenceEquals(resolved.DeclaringType, resolvedType))
-+                    return resolved;
-+            }
-+
-+            const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
-+            FieldInfo? field = resolvedType.GetField(name, Flags);
-+            if (field != null)
-+                return field;
-+
-+            throw new MissingFieldException(resolvedType.FullName, name);
++            return typeb.RuntimeResolve().GetField(this);
          }
  
          public override Module Module
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeILGenerator.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeILGenerator.Mono.cs
-index ae834947bc0..f6330918589 100644
+index ae834947bc0..3281de5756c 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeILGenerator.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeILGenerator.Mono.cs
 @@ -347,8 +347,8 @@ public override void BeginCatchBlock(Type? exceptionType)
@@ -81,7 +128,7 @@ index ae834947bc0..f6330918589 100644
 -            if (exceptionType != null && exceptionType.IsUserType)
 -                throw new NotSupportedException(SR.PlatformNotSupported_UserDefinedSubclassesOfType);
 +            if (exceptionType != null)
-+                exceptionType = RuntimeTypeBuilder.ResolveUserType(exceptionType);
++                exceptionType = RuntimeTypeBuilder.NormalizeTypeForRuntimeEmit(exceptionType);
              if (ex_handlers![cur_block].LastClauseType() == ILExceptionBlock.FILTER_START)
              {
                  if (exceptionType != null)
@@ -91,76 +138,54 @@ index ae834947bc0..f6330918589 100644
              ArgumentNullException.ThrowIfNull(localType);
 -            if (localType.IsUserType)
 -                throw new NotSupportedException(SR.PlatformNotSupported_UserDefinedSubclassesOfType);
-+            localType = RuntimeTypeBuilder.ResolveUserType(localType)!;
++            localType = RuntimeTypeBuilder.NormalizeTypeForRuntimeEmit(localType);
              RuntimeLocalBuilder res = new RuntimeLocalBuilder(localType, this);
              res.is_pinned = pinned;
  
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeMethodBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeMethodBuilder.Mono.cs
-index c891daa7459..4ebc5f3cce2 100644
+index c891daa7459..c3bfdbd032f 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeMethodBuilder.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeMethodBuilder.Mono.cs
-@@ -271,9 +271,45 @@ internal override Type GetParameterType(int pos)
+@@ -271,9 +271,36 @@ internal override Type GetParameterType(int pos)
              return parameters![pos];
          }
  
 +        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2075:UnrecognizedReflectionPattern",
-+            Justification = "Linker doesn't analyze RuntimeResolve but it's an identity function")]
++            Justification = "Reflection.Emit runtime resolution is not subject to trimming")]
          internal MethodBase RuntimeResolve()
          {
 -            return type.RuntimeResolve().GetMethod(this);
 +            Type resolvedType = type.RuntimeResolve();
-+            if (!mhandle.IsNullHandle())
++
++            if (Name != ConstructorInfo.ConstructorName && Name != ConstructorInfo.TypeConstructorName)
++                return resolvedType.GetMethod(this);
++
++            if (mhandle.Value != IntPtr.Zero)
++                return MethodBase.GetMethodFromHandle(mhandle, resolvedType.TypeHandle)!;
++
++            const BindingFlags bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
++            int metadataToken = MetadataToken;
++
++            foreach (MethodInfo method in resolvedType.GetMethods(bindingFlags))
 +            {
-+                MethodBase? resolved = GetMethodFromHandle(mhandle, resolvedType.TypeHandle);
-+                if (resolved != null && ReferenceEquals(resolved.DeclaringType, resolvedType))
-+                    return resolved;
++                if (method.MetadataToken == metadataToken)
++                    return method;
 +            }
 +
-+            Type[] parameterTypes;
-+            if (parameters == null || parameters.Length == 0)
++            foreach (ConstructorInfo ctor in resolvedType.GetConstructors(bindingFlags))
 +            {
-+                parameterTypes = Type.EmptyTypes;
-+            }
-+            else
-+            {
-+                parameterTypes = new Type[parameters.Length];
-+                for (int i = 0; i < parameters.Length; ++i)
-+                    parameterTypes[i] = parameters[i].InternalResolve();
-+            }
-+
-+            const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
-+
-+            if (name == ConstructorInfo.ConstructorName || name == ConstructorInfo.TypeConstructorName)
-+            {
-+                ConstructorInfo? ctor = resolvedType.GetConstructor(Flags, binder: null, call_conv, parameterTypes, modifiers: null);
-+                if (ctor != null)
++                if (ctor.MetadataToken == metadataToken)
 +                    return ctor;
-+                throw new MissingMethodException(resolvedType.FullName, name);
 +            }
 +
-+            MethodInfo? method = resolvedType.GetMethod(name, Flags, binder: null, call_conv, parameterTypes, modifiers: null);
-+            if (method != null)
-+                return method;
-+
-+            throw new MissingMethodException(resolvedType.FullName, name);
++            string typeName = type.FullName ?? type.Name;
++            string assemblyName = type.Assembly.FullName ?? SR.IO_UnknownFileName;
++            throw new TypeLoadException(SR.Format(SR.ClassLoad_General, typeName, assemblyName));
          }
  
          internal Module GetModule()
-diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
-index 91ba1108493..d9c134f9a63 100644
---- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
-+++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeModuleBuilder.Mono.cs
-@@ -851,7 +851,7 @@ public override int GetHashCode()
- 
-         public override bool IsDefined(Type attributeType, bool inherit)
-         {
--            return base.IsDefined(attributeType, inherit);
-+            return CustomAttribute.IsDefined(this, attributeType, inherit);
-         }
- 
-         public override object[] GetCustomAttributes(bool inherit) => CustomAttribute.GetCustomAttributes(this, inherit);
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
-index 230c52dd304..87cb697e491 100644
+index 230c52dd304..59ae46e0be6 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
 @@ -41,6 +41,7 @@
@@ -171,317 +196,651 @@ index 230c52dd304..87cb697e491 100644
  
  namespace System.Reflection.Emit
  {
-@@ -674,6 +675,22 @@ private bool has_ctor_method()
-             return false;
-         }
- 
-+        private static bool TryTypeResolve(RuntimeTypeBuilder typeBuilder)
-+        {
-+            Debug.Assert(!typeBuilder.is_created);
-+
-+            string? fullName = typeBuilder.FullName;
-+            if (fullName == null)
-+                return false;
-+
-+            RuntimeAssembly? requestingAssembly = typeBuilder.Assembly as RuntimeAssembly;
-+            if (requestingAssembly == null && typeBuilder.Assembly is AssemblyBuilder assemblyBuilder)
-+                requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
-+
-+            _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
-+            return typeBuilder.is_created;
-+        }
-+
-         // We require emitted types to have all members on their bases to be accessible.
-         // This is basically an identity function for `this`.
-         [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2083:UnrecognizedReflectionPattern",
-@@ -702,7 +719,7 @@ protected override TypeInfo CreateTypeInfoCore()
+@@ -702,9 +703,10 @@ protected override TypeInfo CreateTypeInfoCore()
                      if (!fb.IsStatic && (ft is RuntimeTypeBuilder builder) && ft.IsValueType && (ft != this) && is_nested_in(ft))
                      {
                          RuntimeTypeBuilder tb = builder;
 -                        if (!tb.is_created)
-+                        if (!tb.is_created && !TryTypeResolve(tb))
++                        if (tb.created == null)
                          {
-                             throw new NotImplementedException();
+-                            throw new NotImplementedException();
++                            if (!tb.TryResolveForRuntime(Assembly))
++                                throw GetTypeLoadException(tb);
                          }
-@@ -747,7 +764,7 @@ protected override TypeInfo CreateTypeInfoCore()
+                     }
+                 }
+@@ -739,16 +741,16 @@ protected override TypeInfo CreateTypeInfoCore()
+                 throw new TypeLoadException(SR.Format(SR.TypeLoad_AssemblyEnumContainsMethodsError, fullname.DisplayName, Assembly));
+             if (interfaces != null)
+             {
+-                foreach (Type iface in interfaces)
++                for (int i = 0; i < interfaces.Length; i++)
+                 {
++                    Type iface = NormalizeTypeForRuntimeEmit(interfaces[i]);
++                    interfaces[i] = iface;
+                     if (iface.IsNestedPrivate && iface.Assembly != Assembly)
+                         throw new TypeLoadException(SR.Format(SR.TypeLoad_AssemblyInaccessibleInterfaceError, fullname.DisplayName, Assembly, iface.FullName));
+                     if (iface.IsGenericTypeDefinition)
                          throw new BadImageFormatException();
                      if (!iface.IsInterface)
                          throw new TypeLoadException();
 -                    if (iface is RuntimeTypeBuilder builder && !builder.is_created)
-+                    if (iface is RuntimeTypeBuilder builder && !builder.is_created && !TryTypeResolve(builder))
-                         throw new TypeLoadException();
+-                        throw new TypeLoadException();
                  }
              }
-@@ -1506,13 +1523,78 @@ public override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(Dyn
  
-         internal override Type InternalResolve()
-         {
-+            if (createTypeCalled && created == null && !is_hidden_global_type)
-+            {
-+                string? fullName = FullName;
-+                if (fullName != null)
-+                {
-+                    RuntimeAssembly? requestingAssembly = Assembly as RuntimeAssembly;
-+                    if (requestingAssembly == null && Assembly is AssemblyBuilder assemblyBuilder)
-+                        requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
-+
-+                    _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
-+                    if (created != null)
-+                        return created;
-+                }
-+
-+                throw new NotSupportedException(SR.NotSupported_IncompleteTypes);
-+            }
-+
-+            if (!is_created)
-+            {
-+                string? fullName = FullName;
-+                if (fullName != null)
-+                {
-+                    RuntimeAssembly? requestingAssembly = Assembly as RuntimeAssembly;
-+                    if (requestingAssembly == null && Assembly is AssemblyBuilder assemblyBuilder)
-+                        requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
-+
-+                    _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
-+                    if (is_created)
-+                        return created!;
-+                }
-+            }
-             check_created();
-             return created!;
+@@ -821,6 +823,37 @@ internal static void ResolveUserTypes(Type?[]? types)
+                     types[i] = ResolveUserType(types[i]);
          }
+ 
++        internal static Type ValidateTypeForRuntimeEmit(Type type)
++        {
++            if (type.IsUserType)
++                throw new NotSupportedException(SR.PlatformNotSupported_UserDefinedSubclassesOfType);
++
++            return type;
++        }
++
++        internal static void ValidateTypesForRuntimeEmit(Type[]? types)
++        {
++            if (types == null)
++                return;
++
++            for (int i = 0; i < types.Length; ++i)
++                ValidateTypeForRuntimeEmit(types[i]);
++        }
++
++        internal static Type NormalizeTypeForRuntimeEmit(Type type)
++        {
++            return ValidateTypeForRuntimeEmit(ResolveUserType(type)!);
++        }
++
++        internal static void NormalizeTypesForRuntimeEmit(Type[]? types)
++        {
++            if (types == null)
++                return;
++
++            for (int i = 0; i < types.Length; ++i)
++                types[i] = NormalizeTypeForRuntimeEmit(types[i]);
++        }
++
+         [return: NotNullIfNotNull(nameof(t))]
+         internal static Type? ResolveUserType(Type? t)
+         {
+@@ -1512,10 +1545,47 @@ internal override Type InternalResolve()
  
          internal override Type RuntimeResolve()
          {
-+            if (createTypeCalled && created == null && !is_hidden_global_type)
-+            {
-+                string? fullName = FullName;
-+                if (fullName != null)
-+                {
-+                    RuntimeAssembly? requestingAssembly = Assembly as RuntimeAssembly;
-+                    if (requestingAssembly == null && Assembly is AssemblyBuilder assemblyBuilder)
-+                        requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
+-            check_created();
++            if (!TryResolveForRuntime(Assembly))
++                throw GetTypeLoadException(this);
 +
-+                    _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
-+                    if (created != null)
-+                        return created;
-+                }
-+
-+                throw new NotSupportedException(SR.NotSupported_IncompleteTypes);
-+            }
-+
-+            if (!is_created)
-+            {
-+                string? fullName = FullName;
-+                if (fullName != null)
-+                {
-+                    RuntimeAssembly? requestingAssembly = Assembly as RuntimeAssembly;
-+                    if (requestingAssembly == null && Assembly is AssemblyBuilder assemblyBuilder)
-+                        requestingAssembly = Unsafe.As<RuntimeAssembly>(assemblyBuilder);
-+
-+                    _ = AssemblyLoadContext.OnTypeResolve(requestingAssembly, fullName);
-+                    if (is_created)
-+                        return created!;
-+                }
-+            }
-+
-             check_created();
-+            if (created == null && !is_hidden_global_type)
-+                throw new NotSupportedException(SR.NotSupported_IncompleteTypes);
              return created!;
          }
  
++        internal bool TryResolveForRuntime(Assembly? requestingAssembly)
++        {
++            if (created != null)
++                return true;
++
++            if (createTypeCalled)
++                return false;
++
++            AssemblyLoadContext.OnTypeBuilderResolve(requestingAssembly, this);
++            return created != null;
++        }
++
++        internal static Type RuntimeResolveType(Type type, Assembly? requestingAssembly)
++        {
++            if (type is RuntimeTypeBuilder typeBuilder)
++            {
++                if (!typeBuilder.TryResolveForRuntime(requestingAssembly))
++                    throw GetTypeLoadException(typeBuilder);
++
++                return typeBuilder.created!;
++            }
++
++            if (type is TypeBuilderInstantiation || type is SymbolType || type is RuntimeGenericTypeParameterBuilder || type is RuntimeEnumBuilder)
++                return type.RuntimeResolve();
++
++            return type.InternalResolve();
++        }
++
++        private static TypeLoadException GetTypeLoadException(RuntimeTypeBuilder typeBuilder)
++        {
++            string typeName = typeBuilder.FullName ?? typeBuilder.Name;
++            string assemblyName = typeBuilder.Assembly.FullName ?? SR.IO_UnknownFileName;
++            return new TypeLoadException(SR.Format(SR.ClassLoad_General, typeName, assemblyName));
++        }
++
+         internal bool is_created
+         {
+             get
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SignatureHelper.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SignatureHelper.cs
-index 606dd993e52..c2e3fdb5aa4 100644
+index 606dd993e52..96209654cd2 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SignatureHelper.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SignatureHelper.cs
-@@ -395,14 +395,14 @@ internal static SignatureHelper GetMethodSigHelper(Module? mod, CallingConventio
+@@ -395,15 +395,10 @@ internal static SignatureHelper GetMethodSigHelper(Module? mod, CallingConventio
  
              returnType ??= typeof(void);
  
 -            if (returnType.IsUserType)
 -                throw new NotSupportedException(SR.PlatformNotSupported_UserDefinedSubclassesOfType);
-+            returnType = RuntimeTypeBuilder.ResolveUserType(returnType)!;
-+
-+            Type[]? resolvedParameters = null;
-             if (parameters != null)
-             {
-+                resolvedParameters = new Type[parameters.Length];
-                 for (int i = 0; i < parameters.Length; ++i)
+-            if (parameters != null)
+-            {
+-                for (int i = 0; i < parameters.Length; ++i)
 -                    if (parameters[i].IsUserType)
 -                        throw new NotSupportedException(SR.PlatformNotSupported_UserDefinedSubclassesOfType);
--
-+                    resolvedParameters[i] = RuntimeTypeBuilder.ResolveUserType(parameters[i])!;
-             }
++            returnType = RuntimeTypeBuilder.NormalizeTypeForRuntimeEmit(returnType);
+ 
+-            }
++            if (parameters != null)
++                RuntimeTypeBuilder.NormalizeTypesForRuntimeEmit(parameters);
  
              SignatureHelper helper = new SignatureHelper((ModuleBuilder?)mod, SignatureHelperType.HELPER_METHOD);
-@@ -410,11 +410,9 @@ internal static SignatureHelper GetMethodSigHelper(Module? mod, CallingConventio
-             helper.callConv = callingConvention;
-             helper.unmanagedCallConv = unmanagedCallingConvention;
- 
--            if (parameters != null)
-+            if (resolvedParameters != null)
+             helper.returnType = returnType;
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SymbolType.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SymbolType.Mono.cs
+index 8351ba208b0..1f5a70421ff 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SymbolType.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/SymbolType.Mono.cs
+@@ -60,18 +60,27 @@ internal override Type InternalResolve()
+         // Called from the runtime to return the corresponding finished Type object
+         internal override Type RuntimeResolve()
+         {
++            Type resolvedBaseType = RuntimeTypeBuilder.RuntimeResolveType(_baseType, _baseType.Assembly);
++
+             if (_typeKind == TypeKind.IsArray)
              {
--                helper.arguments = new Type[parameters.Length];
--                for (int i = 0; i < parameters.Length; ++i)
--                    helper.arguments[i] = parameters[i];
-+                helper.arguments = resolvedParameters;
+-                Type et = _baseType.RuntimeResolve();
+                 if (_rank == 1)
+                 {
+-                    return et.MakeArrayType();
++                    return resolvedBaseType.MakeArrayType();
+                 }
+ 
+-                return et.MakeArrayType(_rank);
++                return resolvedBaseType.MakeArrayType(_rank);
              }
  
-             return helper;
-diff --git a/src/mono/mono/metadata/class-init.c b/src/mono/mono/metadata/class-init.c
-index 1ab7410538c..b225002b215 100644
---- a/src/mono/mono/metadata/class-init.c
-+++ b/src/mono/mono/metadata/class-init.c
-@@ -974,6 +974,9 @@ mono_class_create_generic_inst (MonoGenericClass *gclass)
- 		if (!gklass->wastypebuilder)
- 			klass->inited = 1;
- 
-+		if (!klass->instance_size)
-+			klass->instance_size = gklass->instance_size ? gklass->instance_size : MONO_ABI_SIZEOF (MonoObject);
+-            return InternalResolve();
++            if (_typeKind == TypeKind.IsByRef)
++                return resolvedBaseType.MakeByRefType();
 +
- 		if (klass->enumtype) {
- 			/*
- 			 * For enums, gklass->fields might not been set, but instance_size etc. is
-diff --git a/src/mono/mono/metadata/object.c b/src/mono/mono/metadata/object.c
-index 94b86c74d72..ec0038598be 100644
---- a/src/mono/mono/metadata/object.c
-+++ b/src/mono/mono/metadata/object.c
-@@ -7990,6 +7990,7 @@ gint32
- mono_class_value_size (MonoClass *klass, guint32 *align)
- {
- 	gint32 size;
-+	gint32 min_object_size = MONO_ABI_SIZEOF (MonoObject);
- 
- 	/* fixme: check disable, because we still have external revereces to
- 	 * mscorlib and Dummy Objects
-@@ -8005,7 +8006,21 @@ mono_class_value_size (MonoClass *klass, guint32 *align)
- 		return 0;
- 	}
- 
--	size = size - MONO_ABI_SIZEOF (MonoObject);
-+	if (G_UNLIKELY (size < min_object_size)) {
-+		g_warning ("mono_class_value_size: invalid instance size %d for class %s.%s (kind=%d inited=%d size_inited=%d wastypebuilder=%d)",
-+			size,
-+			m_class_get_name_space (klass),
-+			m_class_get_name (klass),
-+			klass->class_kind,
-+			klass->inited,
-+			klass->size_inited,
-+			klass->wastypebuilder);
-+		if (align)
-+			*align = 1;
-+		return 0;
-+	}
++            if (_typeKind == TypeKind.IsPointer)
++                return resolvedBaseType.MakePointerType();
 +
-+	size = size - min_object_size;
- 
- 	g_assert (size >= 0);
- 	if (align)
-diff --git a/src/mono/mono/metadata/sre.c b/src/mono/mono/metadata/sre.c
-index 47b303d86ba..e3182711deb 100644
---- a/src/mono/mono/metadata/sre.c
-+++ b/src/mono/mono/metadata/sre.c
-@@ -1069,7 +1069,7 @@ mono_image_create_token (MonoDynamicImage *assembly, MonoObjectHandle obj,
- 	int how_collide;
- 	how_collide = MONO_DYN_IMAGE_TOK_SAME_OK;
- 
--	if (strcmp (klass->name, "RuntimeType") == 0) {
-+	if (strcmp (klass->name, "RuntimeType") == 0 || strcmp (klass->name, "RuntimeTypeBuilder") == 0) {
- 		MonoType *type = mono_reflection_type_handle_mono_type (MONO_HANDLE_CAST (MonoReflectionType, obj), error);
- 		goto_if_nok (error, leave);
- 		MonoClass *mc = mono_class_from_mono_type_internal (type);
-@@ -2556,6 +2556,7 @@ reflection_setup_internal_class_internal (MonoReflectionTypeBuilderHandle ref_tb
- 	klass->image = &dynamic_image->image;
- 
- 	klass->inited = 1; /* we lie to the runtime */
-+	klass->instance_size = MONO_ABI_SIZEOF (MonoObject);
- 	klass->name = mono_string_to_utf8_image (klass->image, ref_name, error);
- 	goto_if_nok (error, leave);
- 	klass->name_hash = mono_metadata_str_hash (klass->name);
-@@ -2639,6 +2640,8 @@ reflection_setup_internal_class_internal (MonoReflectionTypeBuilderHandle ref_tb
- 		// If we failed to create the parent, fail the child
- 		if (!parent_type)
- 			goto leave;
++            throw new NotSupportedException();
+         }
 +
-+		klass->parent = mono_class_from_mono_type_internal (parent_type);
- 	}
++        internal override bool IsUserType => _baseType.IsUserType;
+     }
+ }
+diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/TypeBuilderInstantiation.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/TypeBuilderInstantiation.Mono.cs
+index 51e9159ab4d..dbb98b1162b 100644
+--- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/TypeBuilderInstantiation.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/TypeBuilderInstantiation.Mono.cs
+@@ -56,23 +56,30 @@ internal override Type InternalResolve()
+         }
  
- 	// Push the child type and parent type to process later
-@@ -3569,6 +3572,13 @@ typebuilder_setup_fields (MonoClass *klass, MonoError *error)
- 		instance_size = MONO_ABI_SIZEOF (MonoObject);
- 	}
- 
-+	/*
-+	 * Keep a sane object size even if field setup fails before layout runs.
-+	 * TypeBuilder marks size_inited early to avoid recursive setup crashes,
-+	 * so initialize instance_size up front to the parent/object baseline.
-+	 */
-+	klass->instance_size = instance_size;
+         // Called from the runtime to return the corresponding finished Type object
++        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2055:UnrecognizedReflectionPattern",
++            Justification = "Reflection.Emit is not subject to trimming")]
+         internal override Type RuntimeResolve()
+         {
+-            if (_genericType is TypeBuilder tb && !tb.IsCreated())
+-                throw new NotImplementedException();
++            System.Reflection.Assembly? requestingAssembly = _genericType.Assembly;
 +
- 	int fcount = tb->num_fields;
- 	mono_class_set_field_count (klass, fcount);
- 
-@@ -3792,6 +3802,18 @@ ves_icall_TypeBuilder_create_runtime_class (MonoReflectionTypeBuilderHandle ref_
- 	MonoType *type = MONO_HANDLE_GETVAL (MONO_HANDLE_CAST (MonoReflectionType, ref_tb), type);
- 	MonoClass *klass = mono_class_from_mono_type_internal (type);
- 
-+	MonoReflectionTypeHandle ref_parent;
-+	ref_parent = MONO_HANDLE_CAST (MonoReflectionType, MONO_HANDLE_NEW_GET (MonoObject, ref_tb, parent));
-+	if (!MONO_HANDLE_IS_NULL (ref_parent)) {
-+		MonoType *parent_type = MONO_HANDLE_GETVAL (ref_parent, type);
-+		if (!parent_type)
-+			parent_type = mono_reflection_type_handle_mono_type (ref_parent, error);
-+		goto_if_nok (error, parent_sync_failed);
++            Type gtd = RuntimeTypeBuilder.RuntimeResolveType(_genericType, requestingAssembly);
 +
-+		if (parent_type)
-+			klass->parent = mono_class_from_mono_type_internal (parent_type);
-+	}
++            Type[] args = new Type[_typeArguments.Length];
+             for (int i = 0; i < _typeArguments.Length; ++i)
+             {
+-                Type t = _typeArguments[i];
+-                if (t is TypeBuilder ttb && !ttb.IsCreated())
+-                    throw new NotImplementedException();
++                args[i] = RuntimeTypeBuilder.RuntimeResolveType(_typeArguments[i], requestingAssembly);
+             }
+-            return InternalResolve();
 +
- 	MonoArrayHandle cattrs = MONO_HANDLE_NEW_GET (MonoArray, ref_tb, cattrs);
- 	mono_save_custom_attrs (klass->image, klass, MONO_HANDLE_RAW (cattrs)); /* FIXME use handles */
++            return gtd.MakeGenericType(args);
+         }
  
-@@ -3913,6 +3935,9 @@ failure:
- 	mono_loader_unlock ();
- failure_unlocked:
- 	return MONO_HANDLE_CAST (MonoReflectionType, NULL_HANDLE);
+         internal override bool IsUserType
+         {
+             get
+             {
++                if (_genericType.IsUserType)
++                    return true;
 +
-+parent_sync_failed:
-+	return MONO_HANDLE_CAST (MonoReflectionType, NULL_HANDLE);
+                 foreach (Type t in _typeArguments)
+                 {
+                     if (t.IsUserType)
+diff --git a/src/mono/System.Private.CoreLib/src/System/RuntimeType.Mono.cs b/src/mono/System.Private.CoreLib/src/System/RuntimeType.Mono.cs
+index db853759e2d..40fceb4f330 100644
+--- a/src/mono/System.Private.CoreLib/src/System/RuntimeType.Mono.cs
++++ b/src/mono/System.Private.CoreLib/src/System/RuntimeType.Mono.cs
+@@ -1774,7 +1774,8 @@ internal override ConstructorInfo GetConstructor(ConstructorInfo fromNoninstanci
+         {
+             ArgumentNullException.ThrowIfNull(fromNoninstanciated);
+             var this_type = this;
+-            return (ConstructorInfo)GetCorrespondingInflatedMethod(new QCallTypeHandle(ref this_type), fromNoninstanciated);
++            var x = GetCorrespondingInflatedMethod(new QCallTypeHandle(ref this_type), fromNoninstanciated);
++            return (ConstructorInfo)x!;
+         }
+ 
+         [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2085:UnrecognizedReflectionPattern",
+@@ -1784,7 +1785,8 @@ internal override FieldInfo GetField(FieldInfo fromNoninstanciated)
+             /* create sensible flags from given FieldInfo */
+             BindingFlags flags = fromNoninstanciated.IsStatic ? BindingFlags.Static : BindingFlags.Instance;
+             flags |= fromNoninstanciated.IsPublic ? BindingFlags.Public : BindingFlags.NonPublic;
+-            return GetField(fromNoninstanciated.Name, flags)!;
++            FieldInfo? field = GetField(fromNoninstanciated.Name, flags);
++            return field!;
+         }
+ 
+         private string? GetDefaultMemberName()
+diff --git a/src/mono/mono/metadata/appdomain.c b/src/mono/mono/metadata/appdomain.c
+index f0a7789108d..2cb8a8cc78f 100644
+--- a/src/mono/mono/metadata/appdomain.c
++++ b/src/mono/mono/metadata/appdomain.c
+@@ -455,6 +455,58 @@ exit:
+ 	HANDLE_FUNCTION_RETURN_REF (MonoReflectionAssembly, MONO_HANDLE_CAST (MonoReflectionAssembly, ret));
  }
  
- typedef struct {
-@@ -4206,22 +4231,6 @@ mono_reflection_resolve_object (MonoImage *image, MonoObject *obj, MonoClass **h
- 		}
- 		*handle_class = mono_defaults.fieldhandle_class;
- 		g_assert (result);
--	} else if (is_sre_type_builder (oklass)) {
--		MonoReflectionTypeBuilderHandle tb = MONO_HANDLE_NEW (MonoReflectionTypeBuilder, (MonoReflectionTypeBuilder*)obj);
--		MonoType *type = mono_reflection_type_get_handle (&MONO_HANDLE_RAW (tb)->type, error);
--		goto_if_nok (error, return_null);
--		MonoClass *klass;
++MonoReflectionAssemblyHandle
++mono_domain_try_type_resolve_typebuilder (MonoAssembly *requesting_assembly, MonoReflectionTypeBuilderHandle typebuilder, MonoError *error)
++{
++	MonoObjectHandle ret;
++	MonoReflectionAssemblyHandle requesting_assembly_handle;
++
++	HANDLE_FUNCTION_ENTER ();
++
++	MONO_STATIC_POINTER_INIT (MonoMethod, method)
++
++		static gboolean inited;
++		// avoid repeatedly calling mono_class_get_method_from_name_checked
++		if (!inited) {
++			ERROR_DECL (local_error);
++			MonoClass *alc_class = mono_class_get_assembly_load_context_class ();
++			g_assert (alc_class);
++			method = mono_class_get_method_from_name_checked (alc_class, "OnTypeBuilderResolve", -1, 0, local_error);
++			mono_error_cleanup (local_error);
++			inited = TRUE;
++		}
++
++	MONO_STATIC_POINTER_INIT_END (MonoMethod, method)
++
++	if (!method)
++		goto return_null;
++
++	g_assert (MONO_HANDLE_BOOL (typebuilder));
++
++	if (mono_runtime_get_no_exec ())
++		goto return_null;
++
++	if (requesting_assembly) {
++		requesting_assembly_handle = mono_assembly_get_object_handle (requesting_assembly, error);
++		goto_if_nok (error, return_null);
++	} else {
++		requesting_assembly_handle = MONO_HANDLE_CAST (MonoReflectionAssembly, NULL_HANDLE);
++	}
++
++	gpointer args [2];
++	args [0] = MONO_HANDLE_RAW (requesting_assembly_handle);
++	args [1] = MONO_HANDLE_RAW (typebuilder);
++	ret = mono_runtime_try_invoke_handle (method, NULL_HANDLE, args, error);
++	goto_if_nok (error, return_null);
++	goto exit;
++
++return_null:
++	ret = NULL_HANDLE;
++
++exit:
++	HANDLE_FUNCTION_RETURN_REF (MonoReflectionAssembly, MONO_HANDLE_CAST (MonoReflectionAssembly, ret));
++}
++
+ MonoAssembly*
+ mono_try_assembly_resolve (MonoAssemblyLoadContext *alc, const char *fname_raw, MonoAssembly *requesting, MonoError *error)
+ {
+diff --git a/src/mono/mono/metadata/class.c b/src/mono/mono/metadata/class.c
+index 09be31ac3b2..40f00f7e86e 100644
+--- a/src/mono/mono/metadata/class.c
++++ b/src/mono/mono/metadata/class.c
+@@ -4883,8 +4883,8 @@ mono_ldtoken_checked (MonoImage *image, guint32 token, MonoClass **handle_class,
+ 	if (image_is_dynamic (image)) {
+ 		MonoClass *tmp_handle_class;
+ 		gpointer obj = mono_lookup_dynamic_token_class (image, token, TRUE, &tmp_handle_class, context, error);
 -
--		klass = m_type_data_get_klass (type);
--		if (klass->wastypebuilder) {
--			/* Already created */
--			result = klass;
--		} else {
+-		mono_error_assert_ok (error);
++		if (!is_ok (error))
++			return NULL;
+ 		g_assert (tmp_handle_class);
+ 		if (handle_class)
+ 			*handle_class = tmp_handle_class;
+diff --git a/src/mono/mono/metadata/external-only.c b/src/mono/mono/metadata/external-only.c
+index 8528a1701f5..e14597038c7 100644
+--- a/src/mono/mono/metadata/external-only.c
++++ b/src/mono/mono/metadata/external-only.c
+@@ -21,6 +21,7 @@
+ #include <mono/metadata/object.h>
+ #include "assembly-internals.h"
+ #include "external-only.h"
++#include <mono/metadata/reflection-internals.h>
+ #include <mono/metadata/threads.h>
+ #include <mono/metadata/mono-private-unstable.h>
+ #include "threads-types.h"
+@@ -674,14 +675,20 @@ mono_domain_try_type_resolve (MonoDomain *domain, char *name, MonoObject *typebu
+ 
+ 	MonoReflectionAssemblyHandle ret = NULL_HANDLE_INIT;
+ 
+-	// This will not work correctly on netcore
+ 	if (name) {
+ 		MonoStringHandle name_handle = mono_string_new_handle (name, error);
+ 		goto_if_nok (error, exit);
+ 		ret = mono_domain_try_type_resolve_name (NULL, name_handle, error);
+ 	} else {
+-		// TODO: make this work on netcore when working on SRE.TypeBuilder
+-		g_assert_not_reached ();
++		MonoReflectionTypeBuilderHandle typebuilder = MONO_HANDLE_NEW (MonoReflectionTypeBuilder, (MonoReflectionTypeBuilder*)typebuilder_raw);
++		MonoType *type = mono_reflection_type_get_type (&MONO_HANDLE_RAW (typebuilder)->type);
++
++		ret = mono_domain_try_type_resolve_typebuilder (NULL, typebuilder, error);
++		goto_if_nok (error, exit);
++
++		MonoClass *klass = m_type_data_get_klass (type);
++		if (!klass->wastypebuilder)
++			ret = MONO_HANDLE_CAST (MonoReflectionAssembly, NULL_HANDLE);
+ 	}
+ 
+ exit:
+diff --git a/src/mono/mono/metadata/reflection-internals.h b/src/mono/mono/metadata/reflection-internals.h
+index 160850ae24e..7e6c335d8ac 100644
+--- a/src/mono/mono/metadata/reflection-internals.h
++++ b/src/mono/mono/metadata/reflection-internals.h
+@@ -22,6 +22,9 @@ TYPED_HANDLE_DECL (MonoReflectionTypeBuilder)
+ MonoReflectionAssemblyHandle
+ mono_domain_try_type_resolve_name (MonoAssembly *assembly, MonoStringHandle name, MonoError *error);
+ 
++MonoReflectionAssemblyHandle
++mono_domain_try_type_resolve_typebuilder (MonoAssembly *requesting_assembly, MonoReflectionTypeBuilderHandle typebuilder, MonoError *error);
++
+ MonoReflectionTypeBuilderHandle
+ mono_class_get_ref_info (MonoClass *klass);
+ 
+diff --git a/src/mono/mono/metadata/sre.c b/src/mono/mono/metadata/sre.c
+index 47b303d86ba..abd3c5d8068 100644
+--- a/src/mono/mono/metadata/sre.c
++++ b/src/mono/mono/metadata/sre.c
+@@ -1368,6 +1368,7 @@ add_custom_modifiers_to_type (MonoType *without_mods, MonoArrayHandle req_array,
+ {
+ 	HANDLE_FUNCTION_ENTER();
+ 	error_init (error);
++	MonoType *ret = without_mods;
+ 
+ 	int num_req_mods = 0;
+ 	if (!MONO_HANDLE_IS_NULL (req_array))
+@@ -1379,7 +1380,7 @@ add_custom_modifiers_to_type (MonoType *without_mods, MonoArrayHandle req_array,
+ 
+ 	const int total_mods = num_req_mods + num_opt_mods;
+ 	if (total_mods == 0)
+-		return without_mods;
++		goto leave;
+ 
+ 	MonoTypeWithModifiers *result;
+ 	const uint8_t total_mods8 = GINT_TO_UINT8 (total_mods);
+@@ -1404,20 +1405,40 @@ add_custom_modifiers_to_type (MonoType *without_mods, MonoArrayHandle req_array,
+ 	for (int i=0; i < num_req_mods; i++) {
+ 		cmods->modifiers [modifier_index].required = TRUE;
+ 		MONO_HANDLE_ARRAY_GETREF (mod_handle, req_array, i);
+-		cmods->modifiers [modifier_index].token = mono_image_create_token (allocator, mod_handle, FALSE, TRUE, error);
++		MonoType *modifier_type = NULL;
++		MonoObject *modifier_obj = MONO_HANDLE_RAW (mod_handle);
++		if (modifier_obj && is_sre_type_builder (mono_object_class (modifier_obj)))
++			modifier_type = ((MonoReflectionType*)modifier_obj)->type;
++		if (!modifier_type)
++			modifier_type = mono_reflection_type_get_handle ((MonoReflectionType*)modifier_obj, error);
++		goto_if_nok (error, leave);
++		cmods->modifiers [modifier_index].token = mono_metadata_token_from_dor (
++			mono_dynimage_encode_typedef_or_ref_full (allocator, modifier_type, TRUE));
+ 		modifier_index--;
+ 	}
+ 
+ 	for (int i=0; i < num_opt_mods; i++) {
+ 		cmods->modifiers [modifier_index].required = FALSE;
+ 		MONO_HANDLE_ARRAY_GETREF (mod_handle, opt_array, i);
+-		cmods->modifiers [modifier_index].token = mono_image_create_token (allocator, mod_handle, FALSE, TRUE, error);
++		MonoType *modifier_type = NULL;
++		MonoObject *modifier_obj = MONO_HANDLE_RAW (mod_handle);
++		if (modifier_obj && is_sre_type_builder (mono_object_class (modifier_obj)))
++			modifier_type = ((MonoReflectionType*)modifier_obj)->type;
++		if (!modifier_type)
++			modifier_type = mono_reflection_type_get_handle ((MonoReflectionType*)modifier_obj, error);
++		goto_if_nok (error, leave);
++		cmods->modifiers [modifier_index].token = mono_metadata_token_from_dor (
++			mono_dynimage_encode_typedef_or_ref_full (allocator, modifier_type, TRUE));
+ 		modifier_index--;
+ 	}
+ 
+ 	g_assert (modifier_index == -1);
++	ret = (MonoType *) result;
+ 
+-	HANDLE_FUNCTION_RETURN_VAL ((MonoType *) result);
++leave:
++	if (!is_ok (error))
++		ret = NULL;
++	HANDLE_FUNCTION_RETURN_VAL (ret);
+ }
+ 
+ static
+@@ -1743,6 +1764,14 @@ mono_reflection_type_handle_mono_type (MonoReflectionTypeHandle ref, MonoError *
+ 		result = mono_reflection_type_handle_mono_type (ref_tb, error);
+ 	} else if (is_sre_type_builder (klass)) {
+ 		MonoReflectionTypeBuilderHandle ref_tb = MONO_HANDLE_CAST (MonoReflectionTypeBuilder, ref);
++		MonoReflectionModuleBuilderHandle ref_module = MONO_HANDLE_NEW_GET (MonoReflectionModuleBuilder, ref_tb, module);
++		MonoDynamicImage *dynamic_image = MONO_HANDLE_GETVAL (ref_module, dynamic_image);
++		MonoAssembly *requesting_assembly = dynamic_image ? dynamic_image->image.assembly : NULL;
++
++		if (MONO_HANDLE_GETVAL (ref, type) == NULL) {
++			mono_domain_try_type_resolve_typebuilder (requesting_assembly, ref_tb, error);
++			goto_if_nok (error, leave);
++		}
+ 
+ 		/* This happens when a finished type references an unfinished one. Have to create the minimal type */
+ 		reflection_setup_internal_class (ref_tb, error);
+@@ -2634,7 +2663,12 @@ reflection_setup_internal_class_internal (MonoReflectionTypeBuilderHandle ref_tb
+ 			goto_if_nok (error, leave);
+ 		}
+ 
+-		parent_type = MONO_HANDLE_GETVAL (ref_parent, type);
++		parent_type = mono_reflection_type_handle_mono_type (ref_parent, error);
++		goto_if_nok (error, leave);
++		if (parent_type != NULL) {
++			MonoClass *resolved_parent_class = mono_class_from_mono_type_internal (parent_type);
++			parent_type = m_class_get_byval_arg (resolved_parent_class);
++		}
+ 
+ 		// If we failed to create the parent, fail the child
+ 		if (!parent_type)
+@@ -2966,10 +3000,33 @@ reflection_methodbuilder_to_mono_method (MonoClass *klass,
+ 		for (gint32 i = 0; i < num_locals; ++i) {
+ 			MonoReflectionLocalBuilder *lb =
+ 				mono_array_get_internal (rmb->ilgen->locals, MonoReflectionLocalBuilder*, i);
++			MonoObject *local_type_obj = lb ? lb->type : NULL;
++			MonoClass *local_type_obj_class = local_type_obj ? mono_object_class (local_type_obj) : NULL;
++
++			if (!lb) {
++				mono_error_set_invalid_operation (error, "LocalBuilder at index %d is null", i);
++				g_printerr ("[:3] reflection_methodbuilder_to_mono_method local builder missing klass=%s.%s method=%s token=0x%08x local=%d/%d\n",
++					m_class_get_name_space (klass), m_class_get_name (klass), m->name ? m->name : "<null>", m->token, i, num_locals);
++				goto fail;
++			}
+ 
+ 			header->locals [i] = image_g_new0 (image, MonoType, 1);
+-			MonoType *type = mono_reflection_type_get_handle ((MonoReflectionType*)lb->type, error);
+-			mono_error_assert_ok (error);
++			MonoType *type = NULL;
++			if (local_type_obj && local_type_obj_class && is_sre_type_builder (local_type_obj_class))
++				type = ((MonoReflectionType*)local_type_obj)->type;
++			if (!type)
++				type = mono_reflection_type_get_handle ((MonoReflectionType*)local_type_obj, error);
++			if (!is_ok (error) || !type) {
++				if (is_ok (error) && !type)
++					mono_error_set_invalid_operation (error, "LocalBuilder type at index %d resolved to null", i);
++				g_printerr ("[:3] reflection_methodbuilder_to_mono_method local resolve failed klass=%s.%s method=%s token=0x%08x local=%d/%d localIndex=%d pinned=%d localTypeObj=%s.%s error=%s.%s msg=%s\n",
++					m_class_get_name_space (klass), m_class_get_name (klass), m->name ? m->name : "<null>", m->token,
++					i, num_locals, lb->local_index, lb->is_pinned,
++					local_type_obj_class ? m_class_get_name_space (local_type_obj_class) : "<null>",
++					local_type_obj_class ? m_class_get_name (local_type_obj_class) : "<null>",
++					mono_error_get_exception_name_space (error), mono_error_get_exception_name (error), mono_error_get_message (error));
++				goto fail;
++			}
+ 			memcpy (header->locals [i], type, mono_sizeof_type (type));
+ 		}
+ 
+@@ -3484,22 +3541,36 @@ typebuilder_setup_one_field (MonoDynamicImage *dynamic_image, MonoClass *klass,
+ 	HANDLE_FUNCTION_ENTER ();
+ 	{
+ 		MonoImage *image = klass->image;
+-		MonoReflectionFieldBuilder *fb;
+ 		MonoClassField *field;
++		MonoArray *ref_tb_fields_raw = NULL;
++		MonoReflectionFieldBuilder *ref_fb_raw = NULL;
++		MonoObject *ref_field_type_obj_raw = NULL;
++		MonoArray *ref_rva_data_raw = NULL;
++		MonoArray *ref_cattrs_raw = NULL;
++		MonoObject *ref_def_value_raw = NULL;
++		MONO_HANDLE_DCL (MonoArray, ref_tb_fields);
++		MONO_HANDLE_DCL (MonoReflectionFieldBuilder, ref_fb);
++		MONO_HANDLE_DCL (MonoObject, ref_field_type_obj);
++		MONO_HANDLE_DCL (MonoArray, ref_rva_data);
++		MONO_HANDLE_DCL (MonoArray, ref_cattrs);
++		MONO_HANDLE_DCL (MonoObject, ref_def_value);
+ 		MonoArray *rva_data;
+ 
+-		fb = (MonoReflectionFieldBuilder *)mono_array_get_internal (tb_fields, gpointer, i);
++		MONO_HANDLE_ASSIGN_RAW (ref_tb_fields, tb_fields);
++		MONO_HANDLE_ARRAY_GETREF (ref_fb, ref_tb_fields, i);
+ 		field = &klass->fields [i];
+ 		m_field_set_parent (field, klass);
+-		field->name = string_to_utf8_image_raw (image, fb->name, error); /* FIXME use handles */
++		MonoStringHandle ref_name = MONO_HANDLE_NEW_GET (MonoString, ref_fb, name);
++		field->name = string_to_utf8_image_raw (image, MONO_HANDLE_RAW (ref_name), error);
+ 		goto_if_nok (error, leave);
+-		if (fb->attrs) {
+-			MonoType *type = mono_reflection_type_get_handle ((MonoReflectionType*)fb->type, error);
++		MONO_HANDLE_ASSIGN (ref_field_type_obj, MONO_HANDLE_NEW_GET (MonoObject, ref_fb, type));
++		if (MONO_HANDLE_GETVAL (ref_fb, attrs)) {
++			MonoType *type = mono_reflection_type_get_handle ((MonoReflectionType*)MONO_HANDLE_RAW (ref_field_type_obj), error);
+ 			goto_if_nok (error, leave);
+ 			field->type = mono_metadata_type_dup (klass->image, type);
+-			field->type->attrs = fb->attrs;
++			field->type->attrs = MONO_HANDLE_GETVAL (ref_fb, attrs);
+ 		} else {
+-			field->type = mono_reflection_type_get_handle ((MonoReflectionType*)fb->type, error);
++			field->type = mono_reflection_type_get_handle ((MonoReflectionType*)MONO_HANDLE_RAW (ref_field_type_obj), error);
+ 			goto_if_nok (error, leave);
+ 		}
+ 		if (klass->enumtype && strcmp (field->name, "value__") == 0) // used by enum classes to store the instance value
+@@ -3517,24 +3588,28 @@ typebuilder_setup_one_field (MonoDynamicImage *dynamic_image, MonoClass *klass,
+ 			goto leave;
+ 		}
+ 
+-		if ((fb->attrs & FIELD_ATTRIBUTE_HAS_FIELD_RVA) && (rva_data = fb->rva_data)) {
++		MONO_HANDLE_ASSIGN (ref_rva_data, MONO_HANDLE_NEW_GET (MonoArray, ref_fb, rva_data));
++		rva_data = MONO_HANDLE_RAW (ref_rva_data);
++		if ((MONO_HANDLE_GETVAL (ref_fb, attrs) & FIELD_ATTRIBUTE_HAS_FIELD_RVA) && rva_data) {
+ 			char *base = mono_array_addr_internal (rva_data, char, 0);
+ 			size_t size = mono_array_length_internal (rva_data);
+ 			char *data = (char *)mono_image_alloc (klass->image, (guint)size);
+ 			memcpy (data, base, size);
+ 			def_value_out->data = data;
+ 		}
+-		if (fb->offset != -1)
+-			field->offset = fb->offset;
+-		fb->handle = field;
+-		mono_save_custom_attrs (klass->image, field, fb->cattrs);
+-
+-		if (fb->def_value) {
++		if (MONO_HANDLE_GETVAL (ref_fb, offset) != -1)
++			field->offset = MONO_HANDLE_GETVAL (ref_fb, offset);
++		MONO_HANDLE_SETVAL (ref_fb, handle, MonoClassField*, field);
++		MONO_HANDLE_ASSIGN (ref_cattrs, MONO_HANDLE_NEW_GET (MonoArray, ref_fb, cattrs));
++		mono_save_custom_attrs (klass->image, field, MONO_HANDLE_RAW (ref_cattrs));
++
++		MONO_HANDLE_ASSIGN (ref_def_value, MONO_HANDLE_NEW_GET (MonoObject, ref_fb, def_value));
++		if (MONO_HANDLE_BOOL (ref_def_value)) {
+ 			guint32 len, idx;
+ 			const char *p, *p2;
+ 			MonoDynamicImage *assembly = (MonoDynamicImage*)klass->image;
+ 			field->type->attrs |= FIELD_ATTRIBUTE_HAS_DEFAULT;
+-			idx = mono_dynimage_encode_constant (assembly, fb->def_value, &def_value_out->def_type);
++			idx = mono_dynimage_encode_constant (assembly, MONO_HANDLE_RAW (ref_def_value), &def_value_out->def_type);
+ 			/* Copy the data from the blob since it might get realloc-ed */
+ 			p = assembly->blob.data + idx;
+ 			len = mono_metadata_decode_blob_size (p, &p2);
+@@ -3543,7 +3618,7 @@ typebuilder_setup_one_field (MonoDynamicImage *dynamic_image, MonoClass *klass,
+ 			memcpy ((gpointer)def_value_out->data, p, len);
+ 		}
+ 
+-		MonoObjectHandle field_builder_handle = MONO_HANDLE_CAST (MonoObject, MONO_HANDLE_NEW (MonoReflectionFieldBuilder, fb));
++		MonoObjectHandle field_builder_handle = MONO_HANDLE_CAST (MonoObject, ref_fb);
+ 		mono_dynamic_image_register_token (dynamic_image, mono_metadata_make_token (MONO_TABLE_FIELD, first_idx + i), field_builder_handle, MONO_DYN_IMAGE_TOK_NEW);
+ 	}
+ leave:
+@@ -4120,8 +4195,14 @@ ensure_complete_type (MonoClass *klass, MonoError *error)
+ 	error_init (error);
+ 
+ 	if (image_is_dynamic (klass->image) && !klass->wastypebuilder && mono_class_has_ref_info (klass)) {
+-		// TODO: make this work on netcore when working on SRE.TypeBuilder
+-		g_assert_not_reached ();
++		MonoReflectionTypeBuilderHandle tb = mono_class_get_ref_info (klass);
++		mono_domain_try_type_resolve_typebuilder (NULL, tb, error);
++		goto_if_nok (error, exit);
++
++		if (!klass->wastypebuilder) {
++			mono_error_set_type_load_class (error, klass, "");
++			goto exit;
++		}
+ 	}
+ 
+ 	if (mono_class_is_ginst (klass)) {
+@@ -4217,8 +4298,15 @@ mono_reflection_resolve_object (MonoImage *image, MonoObject *obj, MonoClass **h
+ 			/* Already created */
+ 			result = klass;
+ 		} else {
 -			// TODO: make this work on netcore when working on SRE.TypeBuilder
 -			g_assert_not_reached();
--		}
--
--		*handle_class = mono_defaults.typehandle_class;
- 	} else if (strcmp (oklass->name, "SignatureHelper") == 0) {
- 		MonoReflectionSigHelper *helper = (MonoReflectionSigHelper*)obj;
- 		MonoMethodSignature *sig;
-@@ -4293,7 +4302,9 @@ mono_reflection_resolve_object (MonoImage *image, MonoObject *obj, MonoClass **h
++			mono_domain_try_type_resolve_typebuilder (image ? image->assembly : NULL, tb, error);
++			goto_if_nok (error, return_null);
++
++			klass = m_type_data_get_klass (type);
++			if (!klass->wastypebuilder) {
++				mono_error_set_type_load_class (error, klass, "");
++				goto return_null;
++			}
++			result = klass;
+ 		}
  
- 		result = method;
- 		*handle_class = mono_defaults.methodhandle_class;
--	} else if (mono_is_sre_method_builder (oklass) ||
-+	} else if (
-+               is_sre_type_builder (oklass) ||
-+			   mono_is_sre_method_builder (oklass) ||
- 			   mono_is_sre_ctor_builder (oklass) ||
- 			   mono_is_sre_field_builder (oklass) ||
- 			   is_sre_gparam_builder (oklass) ||
+ 		*handle_class = mono_defaults.typehandle_class;
+@@ -4305,15 +4393,17 @@ mono_reflection_resolve_object (MonoImage *image, MonoObject *obj, MonoClass **h
+ 		static MonoMethod *resolve_method;
+ 		if (!resolve_method) {
+ 			MonoMethod *m = mono_class_get_method_from_name_checked (mono_class_get_module_builder_class (), "RuntimeResolve", 1, 0, error);
+-			mono_error_assert_ok (error);
+-			g_assert (m);
++			goto_if_nok (error, return_null);
++			if (!m)
++				goto return_null;
+ 			mono_memory_barrier ();
+ 			resolve_method = m;
+ 		}
+ 		void *args [ ] = { obj };
+ 		obj = mono_runtime_invoke_checked (resolve_method, NULL, args, error);
+ 		goto_if_nok (error, return_null);
+-		g_assert (obj);
++		if (!obj)
++			goto return_null;
+ 		result = mono_reflection_resolve_object (image, obj, handle_class, context, error);
+ 		goto exit;
+ 	} else {
