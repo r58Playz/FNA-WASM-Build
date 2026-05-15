@@ -289,38 +289,69 @@ index 91ba1108493..1f3294e7712 100644
          public override object[] GetCustomAttributes(bool inherit) => CustomAttribute.GetCustomAttributes(this, inherit);
  
 diff --git a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
-index 230c52dd304..a3b8423fbf6 100644
+index 230c52dd304..40d30e0090e 100644
 --- a/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
 +++ b/src/mono/System.Private.CoreLib/src/System/Reflection/Emit/RuntimeTypeBuilder.Mono.cs
-@@ -41,6 +41,7 @@
+@@ -41,6 +41,8 @@
  using System.Globalization;
  using System.Runtime.CompilerServices;
  using System.Runtime.InteropServices;
 +using System.Runtime.Loader;
++using System.Threading;
  
  namespace System.Reflection.Emit
  {
-@@ -84,6 +85,10 @@ internal sealed partial class RuntimeTypeBuilder : TypeBuilder
+@@ -84,6 +86,15 @@ internal sealed partial class RuntimeTypeBuilder : TypeBuilder
          private ITypeName fullname;
          private bool createTypeCalled;
          private Type? underlying_type;
-+        // Reentrant lock serializing CreateTypeInfoCore and TryResolveForRuntime,
-+        // so a second thread can't observe createTypeCalled=true while created
-+        // is mid-flight and trip the "poisoned" ClassLoad_General path.
++        // Synchronizes CreateTypeInfoCore/TryResolveForRuntime on the same
++        // instance so a second thread can't observe createTypeCalled=true while
++        // created is mid-flight and trip the "poisoned" ClassLoad_General path.
++        // Only the short state-transition critical sections hold the lock; the
++        // heavy work (OnTypeBuilderResolve / create_runtime_class) runs without
++        // it because those callouts cross into IKVM, which has its own per-type
++        // locks — holding both directions creates a lock-ordering cycle.
 +        private readonly object resolveLock = new object();
++        private Thread? resolveOwner;
  
          protected override TypeAttributes GetAttributeFlagsImpl()
          {
-@@ -681,6 +686,8 @@ private bool has_ctor_method()
+@@ -681,9 +692,31 @@ private bool has_ctor_method()
          [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
          protected override TypeInfo CreateTypeInfoCore()
          {
-+          lock (resolveLock)
-+          {
++            Thread self = Thread.CurrentThread;
++            lock (resolveLock)
++            {
++                // Same-thread re-entry: return whatever's cached, matching the
++                // original guard's semantics.
++                if (resolveOwner == self)
++                    return created!;
++                // Another thread is already creating this instance — wait for
++                // it to finish, then publish its result.
++#if FEATURE_WASM_MANAGED_THREADS || !TARGET_BROWSER
++                while (resolveOwner != null)
++                    Monitor.Wait(resolveLock);
++#endif
++                if (createTypeCalled)
++                    return created ?? (TypeInfo)this;
++                // Claim ownership but DO NOT set createTypeCalled here:
++                // accessors like FullName check is_created and assume
++                // `created` is non-null once it's true. The body sets
++                // createTypeCalled at its original point below.
++                resolveOwner = self;
++            }
++
++            try
++            {
              /* handle nesting_type */
-             if (createTypeCalled)
-                 return created!;
-@@ -702,9 +709,10 @@ protected override TypeInfo CreateTypeInfoCore()
+-            if (createTypeCalled)
+-                return created!;
+ 
+             if (!IsInterface && (parent == null) && (this != typeof(object)) && (FullName != "<Module>"))
+             {
+@@ -702,9 +735,10 @@ protected override TypeInfo CreateTypeInfoCore()
                      if (!fb.IsStatic && (ft is RuntimeTypeBuilder builder) && ft.IsValueType && (ft != this) && is_nested_in(ft))
                      {
                          RuntimeTypeBuilder tb = builder;
@@ -333,7 +364,7 @@ index 230c52dd304..a3b8423fbf6 100644
                          }
                      }
                  }
-@@ -739,16 +747,16 @@ protected override TypeInfo CreateTypeInfoCore()
+@@ -739,16 +773,16 @@ protected override TypeInfo CreateTypeInfoCore()
                  throw new TypeLoadException(SR.Format(SR.TypeLoad_AssemblyEnumContainsMethodsError, fullname.DisplayName, Assembly));
              if (interfaces != null)
              {
@@ -353,7 +384,7 @@ index 230c52dd304..a3b8423fbf6 100644
                  }
              }
  
-@@ -773,7 +781,18 @@ protected override TypeInfo CreateTypeInfoCore()
+@@ -773,7 +807,18 @@ protected override TypeInfo CreateTypeInfoCore()
  
              ResolveUserTypes();
  
@@ -373,15 +404,23 @@ index 230c52dd304..a3b8423fbf6 100644
  
              if (is_hidden_global_type)
              {
-@@ -783,6 +802,7 @@ protected override TypeInfo CreateTypeInfoCore()
+@@ -783,6 +828,15 @@ protected override TypeInfo CreateTypeInfoCore()
              if (created != null)
                  return created;
              return this;
-+          }
++            }
++            finally
++            {
++                lock (resolveLock)
++                {
++                    resolveOwner = null;
++                    Monitor.PulseAll(resolveLock);
++                }
++            }
          }
  
          [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2074:UnrecognizedReflectionPattern",
-@@ -821,6 +841,37 @@ internal static void ResolveUserTypes(Type?[]? types)
+@@ -821,6 +875,37 @@ internal static void ResolveUserTypes(Type?[]? types)
                      types[i] = ResolveUserType(types[i]);
          }
  
@@ -419,7 +458,26 @@ index 230c52dd304..a3b8423fbf6 100644
          [return: NotNullIfNotNull(nameof(t))]
          internal static Type? ResolveUserType(Type? t)
          {
-@@ -1489,8 +1540,21 @@ protected override void SetParentCore([DynamicallyAccessedMembers(DynamicallyAcc
+@@ -1191,11 +1276,13 @@ public override PropertyInfo[] GetProperties(BindingFlags bindingAttr)
+ 
+         protected override bool HasElementTypeImpl()
+         {
+-            // a TypeBuilder can never represent an array, pointer
+-            if (!is_created)
+-                return false;
+-
+-            return created!.HasElementType;
++            // A TypeBuilder can never represent an array/pointer/byref. Once
++            // materialized we can answer from the runtime type; before that
++            // (including the createTypeCalled=true / created=null in-flight
++            // window) the answer is always false. Querying `created` only
++            // when non-null avoids NREs from callers that touch FullName
++            // mid-creation (e.g. diagnostic logs).
++            return created != null && created.HasElementType;
+         }
+ 
+         [DynamicallyAccessedMembers(InvokeMemberMembers)]
+@@ -1489,8 +1576,21 @@ protected override void SetParentCore([DynamicallyAccessedMembers(DynamicallyAcc
                  this.parent = parent;
              }
              this.parent = ResolveUserType(this.parent);
@@ -441,7 +499,7 @@ index 230c52dd304..a3b8423fbf6 100644
          internal int get_next_table_index(int table, int count)
          {
              return pmodule.get_next_table_index(table, count);
-@@ -1512,10 +1576,60 @@ internal override Type InternalResolve()
+@@ -1512,10 +1612,74 @@ internal override Type InternalResolve()
  
          internal override Type RuntimeResolve()
          {
@@ -458,9 +516,21 @@ index 230c52dd304..a3b8423fbf6 100644
 +            if (created != null)
 +                return true;
 +
++            Thread self = Thread.CurrentThread;
 +            lock (resolveLock)
 +            {
-+                // Re-check under the lock: another thread may have completed while we waited.
++                // Same-thread re-entry from inside CreateTypeInfoCore: report
++                // current state without re-driving resolution.
++                if (resolveOwner == self)
++                    return created != null;
++
++                // Another thread is doing the work — wait for it.
++#if FEATURE_WASM_MANAGED_THREADS || !TARGET_BROWSER
++                while (resolveOwner != null)
++                    Monitor.Wait(resolveLock);
++#endif
++
++                // Re-check now that we're alone.
 +                if (created != null)
 +                    return true;
 +
@@ -469,12 +539,14 @@ index 230c52dd304..a3b8423fbf6 100644
 +                    System.IO.File.WriteAllText("/dev/stderr", $"[TryResolveForRuntime] poisoned: createTypeCalled=true created=null for {FullName}\n");
 +                    return false;
 +                }
-+
-+                AssemblyLoadContext.OnTypeBuilderResolve(requestingAssembly, this);
-+                if (created == null)
-+                    System.IO.File.WriteAllText("/dev/stderr", $"[TryResolveForRuntime] handler returned, created still null for {FullName} (createTypeCalled={createTypeCalled})\n");
-+                return created != null;
 +            }
++
++            // Outside the lock: calling into IKVM here while holding resolveLock
++            // creates a lock-ordering cycle with IKVM's per-type Finish lock.
++            AssemblyLoadContext.OnTypeBuilderResolve(requestingAssembly, this);
++            if (created == null)
++                System.IO.File.WriteAllText("/dev/stderr", $"[TryResolveForRuntime] handler returned, created still null for {FullName} (createTypeCalled={createTypeCalled})\n");
++            return created != null;
 +        }
 +
 +        internal static Type RuntimeResolveType(Type type, Assembly? requestingAssembly)
@@ -685,6 +757,27 @@ index db853759e2d..37f7e35453b 100644
          }
  
          private string? GetDefaultMemberName()
+diff --git a/src/mono/browser/runtime/pthreads/shared.ts b/src/mono/browser/runtime/pthreads/shared.ts
+index 69137957eee..6f0b9766c3f 100644
+--- a/src/mono/browser/runtime/pthreads/shared.ts
++++ b/src/mono/browser/runtime/pthreads/shared.ts
+@@ -2,7 +2,6 @@
+ // The .NET Foundation licenses this file to you under the MIT license.
+ 
+ import WasmEnableThreads from "consts:wasmEnableThreads";
+-import BuildConfiguration from "consts:configuration";
+ 
+ import type { GCHandle, MonoThreadMessage, PThreadInfo, PThreadPtr } from "../types/internal";
+ 
+@@ -59,7 +58,7 @@ export function update_thread_info (): void {
+     // this is just to make debugging easier by naming the thread debugger window.
+     // It's not CSP compliant and possibly not performant, that's why it's only enabled in debug builds
+     // in Release configuration, it would be a trimmed by rollup
+-    if (WasmEnableThreads && BuildConfiguration === "Debug" && !runtimeHelpers.cspPolicy) {
++    if (WasmEnableThreads && !runtimeHelpers.cspPolicy) {
+         monoThreadInfo.updateCount++;
+         try {
+             const url = `//# sourceURL=https://dotnet/thread/${monoThreadInfo.updateCount}-${monoThreadInfo.threadPrefix}`;
 diff --git a/src/mono/mono/metadata/appdomain.c b/src/mono/mono/metadata/appdomain.c
 index f0a7789108d..2cb8a8cc78f 100644
 --- a/src/mono/mono/metadata/appdomain.c
@@ -938,28 +1031,56 @@ index 5aa64060067..e8161413faf 100644
  	mono_class_setup_methods (klass);
  	mono_class_setup_vtable (klass);
  	if (mono_class_has_failure (klass))
-diff --git a/src/mono/mono/metadata/loader.c b/src/mono/mono/metadata/loader.c
-index 58ccd6afd15..58fb7ad953a 100644
---- a/src/mono/mono/metadata/loader.c
-+++ b/src/mono/mono/metadata/loader.c
-@@ -1823,6 +1823,17 @@ mono_method_signature_checked_slow (MonoMethod *m, MonoError *error)
- 		return m->signature;
- 	}
- 
-+	if (G_UNLIKELY (mono_metadata_token_table (m->token) != MONO_TABLE_METHOD)) {
-+		const char *_kn = m->klass ? m_class_get_name (m->klass) : "<null>";
-+		const char *_kns = m->klass ? m_class_get_name_space (m->klass) : "<null>";
-+		const char *_imgn = img ? img->name : "<null>";
-+		g_warning ("[bad-method-token] m=%p name=%s class=%s.%s token=0x%08x flags=0x%x iflags=0x%x is_inflated=%d sre_method=%d image=%s",
-+			(void*)m, m->name ? m->name : "<null>",
-+			_kns, _kn, (unsigned) m->token, (unsigned)m->flags, (unsigned)m->iflags,
-+			m->is_inflated ? 1 : 0,
-+			m->sre_method ? 1 : 0,
-+			_imgn);
+diff --git a/src/mono/mono/metadata/image.c b/src/mono/mono/metadata/image.c
+index 7c14b5a97db..7c7e9cf7f72 100644
+--- a/src/mono/mono/metadata/image.c
++++ b/src/mono/mono/metadata/image.c
+@@ -31,6 +31,8 @@
+ #include <mono/metadata/exception-internals.h>
+ #include <mono/utils/checked-build.h>
+ #include <mono/utils/mono-logger-internals.h>
++#include <mono/utils/mono-threads-api.h>
++#include <mono/utils/mono-threads-coop.h>
+ #include <mono/utils/mono-errno.h>
+ #include <mono/utils/mono-path.h>
+ #include <mono/utils/mono-mmap.h>
+@@ -2810,7 +2812,35 @@ mono_g_slist_append_image (MonoImage *image, GSList *list, gpointer data)
+ void
+ mono_image_lock (MonoImage *image)
+ {
+-	mono_locks_os_acquire (&image->lock, ImageDataLock);
++	/* The image lock is contended across threads that can each be in
++	 * different GC states (running managed code, or already in a coop
++	 * blocking section from an icall wrapper). On wasm coop, a thread
++	 * parked in pthread_mutex_lock (Atomics.wait) can't process a
++	 * suspend request — its worker mainloop is blocked — so we have
++	 * to ensure every waiter is suspend-cooperative. */
++	MonoThreadInfo *info = mono_thread_info_current_unchecked ();
++	int state = info ? mono_thread_info_current_state (info) : -1;
++
++	if (state == STATE_RUNNING) {
++		/* Running managed/unsafe code: enter a GC-safe region for the
++		 * wait so the GC can suspend us while we're blocked on the
++		 * mutex. dynamic_image_lock uses this same pattern. */
++		MONO_ENTER_GC_SAFE;
++		mono_os_mutex_lock (&image->lock);
++		MONO_EXIT_GC_SAFE;
++	} else {
++		/* Already in a non-running state (typically STATE_BLOCKING from
++		 * an icall trampoline). MONO_ENTER_GC_SAFE would assert here
++		 * ("Cannot transition from STATE_BLOCKING with DO_BLOCKING").
++		 * A straight pthread_mutex_lock would also be wrong: blocking
++		 * inside it prevents the wasm worker mainloop from processing
++		 * a GC suspend, so the GC initiator hangs waiting for us to
++		 * ack. Use a trylock loop with mono_threads_safepoint() between
++		 * attempts so we can ack suspends while waiting. */
++		while (mono_os_mutex_trylock (&image->lock) != 0)
++			mono_threads_safepoint ();
 +	}
- 	g_assert (mono_metadata_token_table (m->token) == MONO_TABLE_METHOD);
- 	idx = mono_metadata_token_index (m->token);
++	mono_locks_lock_acquired (ImageDataLock, &image->lock);
+ }
  
+ void
 diff --git a/src/mono/mono/metadata/object-internals.h b/src/mono/mono/metadata/object-internals.h
 index a25b69923a8..da30c342743 100644
 --- a/src/mono/mono/metadata/object-internals.h
@@ -1854,10 +1975,45 @@ index 2051c6224e0..c3071fd63c0 100644
  				INIT_VTABLE (vtable);
  			}
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
-index 3fa9b97e3f3..bcd2db84533 100644
+index 3fa9b97e3f3..f69cb3dffba 100644
 --- a/src/mono/mono/mini/interp/transform.c
 +++ b/src/mono/mono/mini/interp/transform.c
-@@ -6823,6 +6823,16 @@ retry_emit:
+@@ -3255,6 +3255,26 @@ interp_inline_method (TransformData *td, MonoMethod *target_method, MonoMethodHe
+ 		td->cbb->next_bb = prev_cbb->next_bb;
+ 		prev_cbb->next_bb = td->entry_bb;
+ 		prev_cbb->emit_state = BB_STATE_EMITTED;
++
++		/* Force td->sp to the outer-visible exit state of the call:
++		 *     prev_sp_offset - nargs + (non_void ? 1 : 0)
++		 *
++		 * Mono's main loop normally self-corrects td->sp from the next
++		 * bblock's stack_state on every transition (see ~line 5742), so
++		 * inlined bodies whose internal sp drifts from this expected
++		 * value are tolerated when the next outer opcode lives in a
++		 * different bblock. When the next outer opcode is in the SAME
++		 * bblock as the call (straight-line code with no branches), no
++		 * transition happens and the body's drift leaks out as a CHECK_STACK
++		 * underflow. Setting sp here keeps the outer's tracking correct
++		 * regardless. Observed with dmb.b (Options.save) inlining
++		 * StringBuilder.append(double) into a printwriter.println("...:"+x)
++		 * chain. */
++		{
++			int expected = prev_sp_offset - nargs +
++				((csignature->ret && csignature->ret->type != MONO_TYPE_VOID) ? 1 : 0);
++			td->sp = td->stack + expected;
++		}
+ 	}
+ 
+ 	td->ip = prev_ip;
+@@ -5602,7 +5622,6 @@ retry_emit:
+ 		in_offset = GPTRDIFF_TO_INT (td->ip - header->code);
+ 		if (!inlining)
+ 			td->current_il_offset = in_offset;
+-
+ 		InterpBasicBlock *new_bb = td->offset_to_bb [in_offset];
+ 		if (new_bb != NULL && td->cbb != new_bb) {
+ 			if (td->verbose_level)
+@@ -6823,6 +6842,16 @@ retry_emit:
  			m = interp_get_method (method, token, image, generic_context, error);
  			goto_if_nok (error, exit);
  
@@ -1874,7 +2030,7 @@ index 3fa9b97e3f3..bcd2db84533 100644
  			csignature = mono_method_signature_internal (m);
  			klass = m->klass;
  
-@@ -7292,7 +7302,7 @@ retry_emit:
+@@ -7292,7 +7321,7 @@ retry_emit:
  
  			MonoClass *field_klass = mono_class_from_mono_type_internal (ftype);
  			mt = mono_mint_type (ftype);
@@ -1883,3 +2039,59 @@ index 3fa9b97e3f3..bcd2db84533 100644
  
  			{
  				if (is_static) {
+diff --git a/src/mono/mono/mini/mini-runtime.c b/src/mono/mono/mini/mini-runtime.c
+index 299f36c0279..9ca5e981cef 100644
+--- a/src/mono/mono/mini/mini-runtime.c
++++ b/src/mono/mono/mini/mini-runtime.c
+@@ -2721,9 +2721,13 @@ mono_jit_compile_method_with_opt (MonoMethod *method, guint32 opt, gboolean jit_
+ 		return_val_if_nok (error, NULL);
+ 	}
+ 
+-	if (mono_llvm_only)
+-		/* Should be handled by the caller */
+-		g_assert (!(method->iflags & METHOD_IMPL_ATTRIBUTE_SYNCHRONIZED));
++	if (mono_llvm_only && (method->iflags & METHOD_IMPL_ATTRIBUTE_SYNCHRONIZED))
++		/* Callers normally wrap synchronized methods, but partial AOT can
++		 * route an unwrapped synchronized method here (e.g. via
++		 * MONO_PATCH_INFO_METHOD_FTNDESC or mono_create_jump_trampoline in
++		 * llvm_only mode). Wrap defensively so the synchronized semantics
++		 * are preserved. */
++		method = mono_marshal_get_synchronized_wrapper (method);
+ 
+ 	/*
+ 	 * ICALL wrappers are handled specially, since there is only one copy of them
+diff --git a/src/mono/mono/utils/mono-threads.c b/src/mono/mono/utils/mono-threads.c
+index 144feb38878..e3a58fc4169 100644
+--- a/src/mono/mono/utils/mono-threads.c
++++ b/src/mono/mono/utils/mono-threads.c
+@@ -326,14 +326,26 @@ mono_threads_wait_pending_operations (void)
+ 		for (gsize i = 0; i < pending_suspends; ++i) {
+ 			THREADS_SUSPEND_DEBUG ("[INITIATOR-WAIT-WAITING]\n");
+ 			mono_atomic_inc_i32 (&waits_done);
+-			if (mono_os_sem_timedwait (&suspend_semaphore, sleepAbortDuration, MONO_SEM_FLAGS_NONE) == MONO_SEM_TIMEDWAIT_RET_SUCCESS)
++			// First wait up to sleepWarnDuration (~ sleepAbortDuration/20).
++			// If that times out, dump the threads (which one is blocking?)
++			// then keep waiting up to the abort deadline. Only abort if the
++			// remaining wait also times out.
++			if (mono_os_sem_timedwait (&suspend_semaphore, sleepWarnDuration, MONO_SEM_FLAGS_NONE) == MONO_SEM_TIMEDWAIT_RET_SUCCESS)
+ 				continue;
+-			mono_stopwatch_stop (&suspension_time);
+ 
++			g_async_safe_printf ("suspend_thread: still waiting for %d threads after %d ms (%zu suspended so far), dumping state:\n",
++				(int)pending_suspends, sleepWarnDuration, i);
+ 			dump_threads ();
+ 
+-			g_async_safe_printf ("WAITING for %d threads, got %zu suspended\n", (int)pending_suspends, i);
+-			g_error ("suspend_thread suspend took %d ms, which is more than the allowed %d ms", (int)mono_stopwatch_elapsed_ms (&suspension_time), sleepAbortDuration);
++			guint32 remaining = (sleepAbortDuration > sleepWarnDuration)
++				? (sleepAbortDuration - sleepWarnDuration)
++				: 0;
++			if (remaining == 0 || mono_os_sem_timedwait (&suspend_semaphore, remaining, MONO_SEM_FLAGS_NONE) != MONO_SEM_TIMEDWAIT_RET_SUCCESS) {
++				mono_stopwatch_stop (&suspension_time);
++				dump_threads ();
++				g_async_safe_printf ("WAITING for %d threads, got %zu suspended\n", (int)pending_suspends, i);
++				g_error ("suspend_thread suspend took %d ms, which is more than the allowed %d ms", (int)mono_stopwatch_elapsed_ms (&suspension_time), sleepAbortDuration);
++			}
+ 		}
+ 		mono_stopwatch_stop (&suspension_time);
+ 		THREADS_SUSPEND_DEBUG ("Suspending %d threads took %d ms.\n", (int)pending_suspends, (int)mono_stopwatch_elapsed_ms (&suspension_time));
