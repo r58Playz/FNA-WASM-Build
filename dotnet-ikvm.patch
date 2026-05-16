@@ -1922,21 +1922,29 @@ index 47b303d86ba..7af3eb0af08 100644
  		goto exit;
  	} else {
 diff --git a/src/mono/mono/mini/interp/interp.c b/src/mono/mono/mini/interp/interp.c
-index 2051c6224e0..c3071fd63c0 100644
+index 2051c6224e0..03fe7299d36 100644
 --- a/src/mono/mono/mini/interp/interp.c
 +++ b/src/mono/mono/mini/interp/interp.c
-@@ -6082,6 +6082,27 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
+@@ -6082,9 +6082,39 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
  		}
  		MINT_IN_CASE(MINT_NEWOBJ) {
  			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [4]];
-+			/* If the cached vtable was allocated with fewer slots than the
-+			 * class currently has (TypeBuilder shell vtable, finalized later
-+			 * to a larger vtable_size), refetch from the class. The
-+			 * CreateType path nulls klass->runtime_vtable for this case so
-+			 * the next mono_class_vtable_checked allocates a properly sized
-+			 * one. Update data_items in place so subsequent dispatches use
-+			 * the fresh vtable too. */
+-			if (!mono_class_is_before_field_init (vtable->klass)) {
+-				INIT_VTABLE (vtable);
++			/* The refetch + cctor run below call mono_class_vtable_checked
++			 * and mono_runtime_class_init_full, both of which require GC
++			 * unsafe mode. The interp normally runs unsafe, but pinvoke
++			 * wrappers can leave the thread in coop blocking when execution
++			 * re-enters here from a transition that didn't unwind cleanly.
++			 * Force unsafe explicitly so we don't hit "Cannot transition
++			 * thread from STATE_BLOCKING with DO_BLOCKING". Stage the cctor
++			 * exception so THROW_EX (which expands to "goto resume") runs
++			 * after the unsafe region exits — otherwise the cookie leaks. */
++			MonoException *__newobj_init_ex = NULL;
 +			{
++				MONO_STACKDATA (__newobj_unsafe_dummy);
++				gpointer __newobj_unsafe_cookie = mono_threads_enter_gc_unsafe_region_internal (&__newobj_unsafe_dummy);
++
 +				int _alloc = mono_vtable_alloc_slots (vtable);
 +				int _vts_now = m_class_get_vtable_size (vtable->klass);
 +				if (G_UNLIKELY (_alloc >= 0 && _vts_now > _alloc)) {
@@ -1949,15 +1957,29 @@ index 2051c6224e0..c3071fd63c0 100644
 +						mono_error_cleanup (_e);
 +					}
 +				}
-+			}
- 			if (!mono_class_is_before_field_init (vtable->klass)) {
- 				INIT_VTABLE (vtable);
++				if (!mono_class_is_before_field_init (vtable->klass) && G_UNLIKELY (!vtable->initialized))
++					__newobj_init_ex = do_init_vtable (vtable, error, frame, ip);
++
++				mono_threads_exit_gc_unsafe_region_internal (__newobj_unsafe_cookie, &__newobj_unsafe_dummy);
  			}
-@@ -6108,6 +6129,20 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
++			if (G_UNLIKELY (__newobj_init_ex))
++				THROW_EX (__newobj_init_ex, ip);
+ 			guint16 imethod_index = ip [3];
+ 			return_offset = ip [1];
+ 			call_args_offset = ip [2];
+@@ -6108,9 +6138,32 @@ MINT_IN_CASE(MINT_BRTRUE_I8_SP) ZEROP_SP(gint64, !=); MINT_IN_BREAK;
  		}
  		MINT_IN_CASE(MINT_NEWOBJ_INLINED) {
  			MonoVTable *vtable = (MonoVTable*) frame->imethod->data_items [ip [2]];
+-			if (!mono_class_is_before_field_init (vtable->klass)) {
+-				INIT_VTABLE (vtable);
++			/* See the MINT_NEWOBJ comment above for why this block forces
++			 * GC unsafe mode and stages the cctor exception. */
++			MonoException *__newobj_inlined_init_ex = NULL;
 +			{
++				MONO_STACKDATA (__newobj_inlined_unsafe_dummy);
++				gpointer __newobj_inlined_unsafe_cookie = mono_threads_enter_gc_unsafe_region_internal (&__newobj_inlined_unsafe_dummy);
++
 +				int _alloc = mono_vtable_alloc_slots (vtable);
 +				int _vts_now = m_class_get_vtable_size (vtable->klass);
 +				if (G_UNLIKELY (_alloc >= 0 && _vts_now > _alloc)) {
@@ -1970,10 +1992,16 @@ index 2051c6224e0..c3071fd63c0 100644
 +						mono_error_cleanup (_e);
 +					}
 +				}
-+			}
- 			if (!mono_class_is_before_field_init (vtable->klass)) {
- 				INIT_VTABLE (vtable);
++				if (!mono_class_is_before_field_init (vtable->klass) && G_UNLIKELY (!vtable->initialized))
++					__newobj_inlined_init_ex = do_init_vtable (vtable, error, frame, ip);
++
++				mono_threads_exit_gc_unsafe_region_internal (__newobj_inlined_unsafe_cookie, &__newobj_inlined_unsafe_dummy);
  			}
++			if (G_UNLIKELY (__newobj_inlined_init_ex))
++				THROW_EX (__newobj_inlined_init_ex, ip);
+ 
+ 			// FIXME push/pop LMF
+ 			MonoObject *o = mono_gc_alloc_obj (vtable, m_class_get_instance_size (vtable->klass));
 diff --git a/src/mono/mono/mini/interp/transform.c b/src/mono/mono/mini/interp/transform.c
 index 3fa9b97e3f3..f69cb3dffba 100644
 --- a/src/mono/mono/mini/interp/transform.c
