@@ -6,7 +6,7 @@ env:
   FNA3D_VERSION: 26.04
   FAUDIO_VERSION: 26.04
   OPENSSL_VERSION: openssl-3.4
-  DOTNET_RUNTIME_VERSION: v10.0.3
+  DOTNET_RUNTIME_VERSION: wasm-10.0.3
   EMSDK_VERSION: 3.1.56
   ZLIB_VERSION: v1.3.1
   LIBJPEG_TURBO_VERSION: 3.0.3
@@ -192,7 +192,7 @@ jobs:
         shell: bash
         run: |
           cd liba/
-          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/dotnet/runtime
+          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
           emcc liba.c -r -o liba.o \
             -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
             -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
@@ -202,16 +202,8 @@ jobs:
       - name: dotnet
         shell: bash
         run: |
-          cd liba/runtime/
-          git apply ../../dotnet.patch
-          git apply ../../dotnet-static-init.patch
-          git apply ../../dotnet-jiterp.patch
-          git apply ../../dotnet-relax-typeload.patch
-          git apply ../../dotnet-ikvm.patch
-          git apply ../../dotnet-mixedaot.patch
           THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
-          ./build.sh -os browser -s mono+libs /p:WasmEnableThreads=$THREADS_FLAG -c Release
-          7z a ../runtime.zip './artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release/*'
+          ./build-dotnet.sh ./liba/runtime $THREADS_FLAG ./liba/runtime.zip
       - name: Freeze emsdk
         if: matrix.pthread_enabled == true
         shell: bash
