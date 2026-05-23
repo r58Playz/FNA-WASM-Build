@@ -5,6 +5,7 @@ usage() {
   echo "usage: $0 <runtime-root> <pthread:true|false> [output-zip]" >&2
   echo "example: $0 ./liba/runtime true ./liba/runtime.zip" >&2
   echo "example: $0 ../dotnet-runtime false ./ST-dotnet.zip" >&2
+  echo "env: WASM_ENABLE_JSPI=true to pass /p:WasmEnableJSPI=true to the runtime build" >&2
   exit 1
 }
 
@@ -15,11 +16,20 @@ fi
 RUNTIME_ROOT="$1"
 PTHREAD_FLAG="$2"
 OUTPUT_ZIP="${3:-$PWD/dotnet.zip}"
+WASM_ENABLE_JSPI="${WASM_ENABLE_JSPI:-false}"
 
 case "$PTHREAD_FLAG" in
   true|false) ;;
   *)
     echo "error: pthread flag must be 'true' or 'false', got: $PTHREAD_FLAG" >&2
+    exit 1
+    ;;
+esac
+
+case "$WASM_ENABLE_JSPI" in
+  true|false) ;;
+  *)
+    echo "error: WASM_ENABLE_JSPI must be 'true' or 'false', got: $WASM_ENABLE_JSPI" >&2
     exit 1
     ;;
 esac
@@ -37,8 +47,8 @@ RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_ZIP")" && pwd)"
 OUTPUT_ZIP="$OUTPUT_DIR/$(basename "$OUTPUT_ZIP")"
 
-echo "Building dotnet runtime (pthread=$PTHREAD_FLAG) in $RUNTIME_ROOT"
-(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:WasmEnableThreads="$PTHREAD_FLAG" -c Release)
+echo "Building dotnet runtime (pthread=$PTHREAD_FLAG, jspi=$WASM_ENABLE_JSPI) in $RUNTIME_ROOT"
+(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release)
 
 # Build the patched WasmAppBuilder so the bundle ships our modified
 # PInvokeTableGenerator + mono_wasm_marshal_get_managed_wrapper signature.
