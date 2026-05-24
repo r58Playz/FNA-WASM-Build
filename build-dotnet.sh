@@ -48,7 +48,7 @@ OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_ZIP")" && pwd)"
 OUTPUT_ZIP="$OUTPUT_DIR/$(basename "$OUTPUT_ZIP")"
 
 echo "Building dotnet runtime (pthread=$PTHREAD_FLAG, jspi=$WASM_ENABLE_JSPI) in $RUNTIME_ROOT"
-(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release)
+(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:RunAOTCompilation=true /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release)
 
 # Build the patched WasmAppBuilder so the bundle ships our modified
 # PInvokeTableGenerator + mono_wasm_marshal_get_managed_wrapper signature.
