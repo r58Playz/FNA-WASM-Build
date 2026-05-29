@@ -5,6 +5,7 @@ env:
   SDL2COMPAT_VERSION: release-2.32.66
   FNA3D_VERSION: 26.04
   FAUDIO_VERSION: 26.04
+  OPENAL_VERSION: 1.24.3
   OPENSSL_VERSION: openssl-3.4
   DOTNET_RUNTIME_VERSION: wasm-10.0.3
   DOTNET_RUNTIME_JSPI_VERSION: wasm-jspi-10.0.3
@@ -140,6 +141,23 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -GNinja
           ninja
+      - name: OpenAL
+        shell: bash
+        run: |
+          git clone https://github.com/kcat/openal-soft -b ${{ env.OPENAL_VERSION }}
+          cd openal-soft
+          cd build
+          emcmake cmake .. -GNinja \
+            -DLIBTYPE=STATIC \
+            -DALSOFT_EMBED_HRTF_DATA=ON \
+            -DALSOFT_BACKEND_SDL3=ON \
+            -DALSOFT_REQUIRE_SDL3=ON \
+            -DSDL3_DIR=/home/runner/work/FNA-WASM-Build/FNA-WASM-Build/SDL/emscripten-build/ \
+            -DALSOFT_RTKIT=OFF \
+            -DALSOFT_EXAMPLES=OFF \
+            -DALSOFT_UTILS=OFF \
+            -DALSOFT_CPUEXT_NEON=OFF
+          ninja
       - name: OpenSSL
         shell: bash
         run: |
@@ -164,6 +182,7 @@ jobs:
           cp ./FNA3D/build/libFNA3D.a Binaries/${PREFIX}FNA3D.a
           cp ./FNA3D/build/libmojoshader.a Binaries/${PREFIX}libmojoshader.a    
           cp ./FAudio/build/libFAudio.a Binaries/${PREFIX}FAudio.a
+          cp ./openal-soft/build/libopenal.a Binaries/${PREFIX}libopenal.a
           cp ./openssl/openssl/libcrypto.a Binaries/${PREFIX}libcrypto.a
       - name: Archive Libraries (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
