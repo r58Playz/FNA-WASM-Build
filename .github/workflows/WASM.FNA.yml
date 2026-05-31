@@ -224,11 +224,6 @@ jobs:
         run: |
           THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
           ./build-dotnet.sh ./liba/runtime $THREADS_FLAG ./liba/runtime.zip
-      - name: Freeze emsdk
-        if: matrix.pthread_enabled == true
-        shell: bash
-        run: |
-          ./freeze-emsdk.sh ./liba/runtime/src/mono/browser/emsdk ./emsdk-frozen.zip
       - name: Copy Binaries (dotnet)
         shell: bash
         run: |
@@ -237,9 +232,6 @@ jobs:
           cp ./liba/liba.o Binaries/${PREFIX}liba.o
           cp ./liba/hot_reload_detour.o Binaries/${PREFIX}hot_reload_detour.o
           cp ./liba/runtime.zip Binaries/${PREFIX}dotnet.zip
-          if [[ ${{ matrix.pthread_enabled == true && 'a' || 'b' }} == "a" ]]; then
-            cp ./emsdk-frozen.zip Binaries/${PREFIX}emsdk.zip
-          fi
       - name: Archive Dotnet (pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
@@ -289,6 +281,37 @@ jobs:
         uses: actions/upload-artifact@master
         with:
           name: WASM-dotnet-jspi
+          path: Binaries/
+
+  freeze-emsdk:
+    runs-on: ubuntu-latest
+    name: Freeze emsdk
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v1
+      - name: Install dependencies
+        run: |
+          sudo apt -y update
+          sudo apt install -y build-essential python-is-python3 curl git patch libicu-dev
+      - name: Provision emsdk via mono buildsystem
+        shell: bash
+        run: |
+          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
+          cd runtime
+          ./build.sh -os browser -s mono.emsdk -c Release
+      - name: Freeze emsdk
+        shell: bash
+        run: |
+          ./freeze-emsdk.sh ./runtime/src/mono/browser/emsdk ./emsdk-frozen.zip
+      - name: Copy Binaries (emsdk)
+        shell: bash
+        run: |
+          mkdir -p Binaries
+          cp ./emsdk-frozen.zip Binaries/emsdk.zip
+      - name: Archive emsdk
+        uses: actions/upload-artifact@master
+        with:
+          name: WASM-emsdk
           path: Binaries/
 
   build-gdiplus:
@@ -659,7 +682,7 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build, build-dotnet, build-dotnet-jspi, build-gdiplus]
+    needs: [build, build-dotnet, build-dotnet-jspi, build-gdiplus, freeze-emsdk]
     name: Create Release
     steps:
       - name: Generate Release Name
