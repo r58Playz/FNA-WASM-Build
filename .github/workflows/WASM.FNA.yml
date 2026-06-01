@@ -239,8 +239,11 @@ jobs:
           path: Binaries/
 
   build-dotnet-jspi:
+    strategy:
+      matrix:
+        pthread_enabled: [true, false]
     runs-on: ubuntu-latest
-    name: Build dotnet (JSPI, pthread=true)
+    name: Build dotnet (JSPI, pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
         uses: actions/checkout@v1
@@ -258,29 +261,23 @@ jobs:
         run: |
           cd liba/
           git clone -b ${{ env.DOTNET_RUNTIME_JSPI_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
-          emcc liba.c -r -o liba.o \
-            -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
-            -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
-          emcc hot_reload_detour.c -r -o hot_reload_detour.o \
-            -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
-            -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
       - name: dotnet
         shell: bash
         env:
           WASM_ENABLE_JSPI: "true"
         run: |
-          ./build-dotnet.sh ./liba/runtime true ./liba/runtime.zip
+          THREADS_FLAG=${{ matrix.pthread_enabled == true && 'true' || 'false' }}
+          ./build-dotnet.sh ./liba/runtime $THREADS_FLAG ./liba/runtime.zip
       - name: Copy Binaries (dotnet-jspi)
         shell: bash
         run: |
           mkdir -p Binaries
-          cp ./liba/liba.o Binaries/liba.o
-          cp ./liba/hot_reload_detour.o Binaries/hot_reload_detour.o
-          cp ./liba/runtime.zip Binaries/dotnet-jspi.zip
-      - name: Archive Dotnet (JSPI)
+          PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
+          cp ./liba/runtime.zip Binaries/${PREFIX}dotnet-jspi.zip
+      - name: Archive Dotnet (JSPI, pthread=${{ matrix.pthread_enabled }})
         uses: actions/upload-artifact@master
         with:
-          name: WASM-dotnet-jspi
+          name: WASM-dotnet-jspi-pthread-${{ matrix.pthread_enabled }}
           path: Binaries/
 
   freeze-emsdk:
