@@ -1,0 +1,65 @@
+Subject: [PATCH] [wasmfs] Use "readwrite-unsafe" mode in OPFS backend
+
+The OPFS backend's SyncAccessHandles are created in the default
+"readwrite" mode, which takes an exclusive per-file lock and prevents
+the same file from being opened by more than one agent (e.g. several
+browser tabs) at once.
+
+Request the "readwrite-unsafe" mode instead, which allows multiple
+simultaneous readers and writers without an exclusive lock, falling
+back to the previous behavior on browsers that do not support it yet.
+
+Implements emscripten-core/emscripten#21869.
+---
+ src/library_wasmfs_opfs.js | 33 +++++++++++++++++++++++++--------
+ 1 file changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/src/library_wasmfs_opfs.js b/src/library_wasmfs_opfs.js
+index 51606d7..d46bb04 100644
+--- a/src/library_wasmfs_opfs.js
++++ b/src/library_wasmfs_opfs.js
+@@ -245,16 +245,33 @@ addToLibrary({
+     try {
+       let accessHandle;
+ #if PTHREADS
+-      // TODO: Remove this once the Access Handles API has settled.
+-      // TODO: Closure is confused by this code that supports two versions of
+-      //       the same API, so suppress type checking on it.
++      // Prefer the "readwrite-unsafe" access mode so that the same file can be
++      // opened by multiple agents (e.g. several browser tabs) at the same time
++      // without acquiring an exclusive lock. See emscripten-core/emscripten#21869.
++      // Fall back to the default/legacy behavior on browsers that do not
++      // support this mode yet.
++      // TODO: Remove the legacy fallback once the Access Handles API has
++      //       settled everywhere.
++      // TODO: Closure is confused by this code that supports several versions
++      //       of the same API, so suppress type checking on it.
+       /** @suppress {checkTypes} */
+-      var len = FileSystemFileHandle.prototype.createSyncAccessHandle.length;
+-      if (len == 0) {
+-        accessHandle = await fileHandle.createSyncAccessHandle();
+-      } else {
++      try {
+         accessHandle = await fileHandle.createSyncAccessHandle(
+-            {mode: "in-place"});
++            {mode: "readwrite-unsafe"});
++      } catch (e) {
++        if (e.name !== "TypeError" && e.name !== "NotSupportedError") {
++          // Not a "mode unsupported" signal; let the outer handler classify it.
++          throw e;
++        }
++        // "readwrite-unsafe" is unavailable, so fall back to the legacy paths.
++        /** @suppress {checkTypes} */
++        var len = FileSystemFileHandle.prototype.createSyncAccessHandle.length;
++        if (len == 0) {
++          accessHandle = await fileHandle.createSyncAccessHandle();
++        } else {
++          accessHandle = await fileHandle.createSyncAccessHandle(
++              {mode: "in-place"});
++        }
+       }
+ #else
+       accessHandle = await wasmfsOPFSCreateAsyncAccessHandle(fileHandle);
+-- 
+2.54.0
+

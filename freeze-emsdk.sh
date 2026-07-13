@@ -70,9 +70,14 @@ if [[ ! -f "$EMSDK_SRC/emscripten/system/lib/wasmfs/thread_utils.h" ]]; then
   echo "error: missing wasmfs thread_utils.h in emsdk source" >&2
   exit 1
 fi
+if [[ ! -f "$EMSDK_SRC/emscripten/src/library_wasmfs_opfs.js" ]]; then
+  echo "error: missing wasmfs OPFS library_wasmfs_opfs.js in emsdk source" >&2
+  exit 1
+fi
 
 apply_patch "${SCRIPT_DIR}/emsdk.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.2.patch"
+apply_patch "${SCRIPT_DIR}/emsdk.3.patch"
 
 EMSDK_CACHE="$EMSDK_SRC/emscripten/cache"
 EMSDK_SYSROOT_LIB="$EMSDK_CACHE/sysroot/lib/wasm32-emscripten"

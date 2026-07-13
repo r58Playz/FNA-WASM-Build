@@ -48,14 +48,14 @@ OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_ZIP")" && pwd)"
 OUTPUT_ZIP="$OUTPUT_DIR/$(basename "$OUTPUT_ZIP")"
 
 echo "Building dotnet runtime (pthread=$PTHREAD_FLAG, jspi=$WASM_ENABLE_JSPI) in $RUNTIME_ROOT"
-(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:RunAOTCompilation=true /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release)
+(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:RunAOTCompilation=true /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release -nodeReuse:false)
 
 # Build the patched WasmAppBuilder so the bundle ships our modified
 # PInvokeTableGenerator + mono_wasm_marshal_get_managed_wrapper signature.
 # The runtime build above usually produces this too, but build it explicitly
 # to be safe — it's cheap and idempotent.
 echo "Building WasmAppBuilder task assembly"
-(cd "$RUNTIME_ROOT" && ./dotnet.sh build -c Release src/tasks/WasmAppBuilder/WasmAppBuilder.csproj)
+(cd "$RUNTIME_ROOT" && ./dotnet.sh build -nodeReuse:false -c Release src/tasks/WasmAppBuilder/WasmAppBuilder.csproj)
 
 RUNTIME_OUT="$RUNTIME_ROOT/artifacts/bin/microsoft.netcore.app.runtime.browser-wasm/Release"
 CROSS_OUT="$RUNTIME_ROOT/artifacts/bin/mono/browser.wasm.Release/cross/browser-wasm"
