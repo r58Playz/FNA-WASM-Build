@@ -1,65 +1,163 @@
-Subject: [PATCH] [wasmfs] Use "readwrite-unsafe" mode in OPFS backend
-
-The OPFS backend's SyncAccessHandles are created in the default
-"readwrite" mode, which takes an exclusive per-file lock and prevents
-the same file from being opened by more than one agent (e.g. several
-browser tabs) at once.
-
-Request the "readwrite-unsafe" mode instead, which allows multiple
-simultaneous readers and writers without an exclusive lock, falling
-back to the previous behavior on browsers that do not support it yet.
-
-Implements emscripten-core/emscripten#21869.
----
- src/library_wasmfs_opfs.js | 33 +++++++++++++++++++++++++--------
- 1 file changed, 25 insertions(+), 8 deletions(-)
-
 diff --git a/src/library_wasmfs_opfs.js b/src/library_wasmfs_opfs.js
-index 51606d7..d46bb04 100644
+index 51606d72e..fa6f449b0 100644
 --- a/src/library_wasmfs_opfs.js
 +++ b/src/library_wasmfs_opfs.js
-@@ -245,16 +245,33 @@ addToLibrary({
+@@ -233,29 +233,72 @@ addToLibrary({
+     wasmfsOPFSDirectoryHandles.free(dirID);
+   },
+ 
++#if PTHREADS
++  // Cached feature-detection of the `mode` option of createSyncAccessHandle
++  // (i.e. non-exclusive "readwrite-unsafe" handles, available in Chrome 121+).
++  // `undefined` until first probed, then `true`/`false`.
++  $wasmfsOPFSAccessModeSupported: undefined,
++
++  // Create a SyncAccessHandle for `fileHandle`. Prefer a non-exclusive
++  // ("readwrite-unsafe") handle so a single file can be opened by multiple
++  // descriptors at once and so read-only files can use the fast synchronous
++  // read path instead of going through a Blob. When `allowExclusive` is set, a
++  // legacy exclusive handle is used as a fallback on browsers without
++  // non-exclusive handles (write opens); otherwise this throws so the caller
++  // can fall back to a Blob (read opens).
++  $wasmfsOPFSGetAccessHandle__deps: ['$wasmfsOPFSAccessModeSupported'],
++  $wasmfsOPFSGetAccessHandle: async function(fileHandle, allowExclusive) {
++    if (wasmfsOPFSAccessModeSupported === undefined) {
++      // Older browsers silently ignore the options argument and always return
++      // an exclusive handle. Probe with an invalid mode: a browser that honors
++      // the option rejects it with a TypeError, while an older one ignores it
++      // and succeeds.
++      try {
++        let probe =
++            await fileHandle.createSyncAccessHandle({mode: "__wasmfs_probe__"});
++        await probe.close();
++        wasmfsOPFSAccessModeSupported = false;
++      } catch (e) {
++        if (e.name !== "TypeError") {
++          // The file is busy or some other error occurred; we cannot conclude
++          // anything about support yet, so don't cache. Handle just this
++          // request: writers can use an exclusive handle, readers fall back.
++          if (allowExclusive) {
++            return fileHandle.createSyncAccessHandle();
++          }
++          throw e;
++        }
++        wasmfsOPFSAccessModeSupported = true;
++      }
++    }
++    if (wasmfsOPFSAccessModeSupported) {
++      return fileHandle.createSyncAccessHandle({mode: "readwrite-unsafe"});
++    }
++    if (allowExclusive) {
++      return fileHandle.createSyncAccessHandle();
++    }
++    // No non-exclusive handle is available and the caller cannot use an
++    // exclusive one; report EACCES so the caller falls back to a Blob.
++    throw new DOMException("non-exclusive OPFS access handle unavailable",
++                           "NoModificationAllowedError");
++  },
++#endif
++
+   _wasmfs_opfs_open_access__deps: ['$wasmfsOPFSFileHandles',
+                                    '$wasmfsOPFSAccessHandles', '$wasmfsOPFSProxyFinish',
+-#if !PTHREADS
++#if PTHREADS
++                                   '$wasmfsOPFSGetAccessHandle',
++#else
+                                    '$wasmfsOPFSCreateAsyncAccessHandle'
+ #endif
+                                   ],
+-  _wasmfs_opfs_open_access: async function(ctx, fileID, accessIDPtr) {
++  _wasmfs_opfs_open_access: async function(ctx, fileID, accessIDPtr, allowExclusive) {
+     let fileHandle = wasmfsOPFSFileHandles.get(fileID);
+     let accessID;
      try {
        let accessHandle;
  #if PTHREADS
 -      // TODO: Remove this once the Access Handles API has settled.
 -      // TODO: Closure is confused by this code that supports two versions of
 -      //       the same API, so suppress type checking on it.
-+      // Prefer the "readwrite-unsafe" access mode so that the same file can be
-+      // opened by multiple agents (e.g. several browser tabs) at the same time
-+      // without acquiring an exclusive lock. See emscripten-core/emscripten#21869.
-+      // Fall back to the default/legacy behavior on browsers that do not
-+      // support this mode yet.
-+      // TODO: Remove the legacy fallback once the Access Handles API has
-+      //       settled everywhere.
-+      // TODO: Closure is confused by this code that supports several versions
-+      //       of the same API, so suppress type checking on it.
-       /** @suppress {checkTypes} */
+-      /** @suppress {checkTypes} */
 -      var len = FileSystemFileHandle.prototype.createSyncAccessHandle.length;
 -      if (len == 0) {
 -        accessHandle = await fileHandle.createSyncAccessHandle();
 -      } else {
-+      try {
-         accessHandle = await fileHandle.createSyncAccessHandle(
+-        accessHandle = await fileHandle.createSyncAccessHandle(
 -            {mode: "in-place"});
-+            {mode: "readwrite-unsafe"});
-+      } catch (e) {
-+        if (e.name !== "TypeError" && e.name !== "NotSupportedError") {
-+          // Not a "mode unsupported" signal; let the outer handler classify it.
-+          throw e;
-+        }
-+        // "readwrite-unsafe" is unavailable, so fall back to the legacy paths.
-+        /** @suppress {checkTypes} */
-+        var len = FileSystemFileHandle.prototype.createSyncAccessHandle.length;
-+        if (len == 0) {
-+          accessHandle = await fileHandle.createSyncAccessHandle();
-+        } else {
-+          accessHandle = await fileHandle.createSyncAccessHandle(
-+              {mode: "in-place"});
-+        }
-       }
+-      }
++      accessHandle = await wasmfsOPFSGetAccessHandle(fileHandle, allowExclusive);
  #else
        accessHandle = await wasmfsOPFSCreateAsyncAccessHandle(fileHandle);
--- 
-2.54.0
-
+ #endif
+diff --git a/system/lib/wasmfs/backends/opfs_backend.cpp b/system/lib/wasmfs/backends/opfs_backend.cpp
+index 6a5be884c..f50eaf2ae 100644
+--- a/system/lib/wasmfs/backends/opfs_backend.cpp
++++ b/system/lib/wasmfs/backends/opfs_backend.cpp
+@@ -60,8 +60,9 @@ public:
+         case O_RDWR:
+         case O_WRONLY:
+           // If we need write access, try to open an AccessHandle.
+-          proxy(
+-            [&](auto ctx) { _wasmfs_opfs_open_access(ctx.ctx, fileID, &id); });
++          proxy([&](auto ctx) {
++            _wasmfs_opfs_open_access(ctx.ctx, fileID, &id, /*allowExclusive=*/1);
++          });
+           // TODO: Fall back to open as a blob instead.
+           if (id < 0) {
+             return id;
+@@ -69,7 +70,22 @@ public:
+           kind = Access;
+           break;
+         case O_RDONLY:
+-          // We only need read access, so open as a Blob
++#ifdef __EMSCRIPTEN_PTHREADS__
++          // Prefer a non-exclusive AccessHandle for a fast, synchronous,
++          // zero-copy read path. This requires the browser to support
++          // non-exclusive ("readwrite-unsafe") access handles; if it does not,
++          // the JS side reports failure and we fall back to a Blob below. A
++          // negative id can also mean the file is currently locked by an
++          // exclusive handle, in which case the Blob is the correct fallback.
++          proxy([&](auto ctx) {
++            _wasmfs_opfs_open_access(ctx.ctx, fileID, &id, /*allowExclusive=*/0);
++          });
++          if (id >= 0) {
++            kind = Access;
++            break;
++          }
++#endif
++          // Otherwise we only need read access, so open as a Blob.
+           proxy(
+             [&](auto ctx) { _wasmfs_opfs_open_blob(ctx.ctx, fileID, &id); });
+           if (id < 0) {
+@@ -83,8 +99,9 @@ public:
+     } else if (kind == Blob && (flags == O_WRONLY || flags == O_RDWR)) {
+       // Try to upgrade to an AccessHandle.
+       int newID;
+-      proxy(
+-        [&](auto ctx) { _wasmfs_opfs_open_access(ctx.ctx, fileID, &newID); });
++      proxy([&](auto ctx) {
++        _wasmfs_opfs_open_access(ctx.ctx, fileID, &newID, /*allowExclusive=*/1);
++      });
+       if (newID < 0) {
+         return newID;
+       }
+diff --git a/system/lib/wasmfs/backends/opfs_backend.h b/system/lib/wasmfs/backends/opfs_backend.h
+index ffd3d25b5..5c09fa6b1 100644
+--- a/system/lib/wasmfs/backends/opfs_backend.h
++++ b/system/lib/wasmfs/backends/opfs_backend.h
+@@ -49,9 +49,15 @@ void _wasmfs_opfs_get_entries(em_proxying_ctx* ctx,
+                               std::vector<Directory::Entry>* entries,
+                               int* err);
+ 
++// Open a SyncAccessHandle for `file_id`, storing its ID in `access_id` (or a
++// negative error code on failure). When `allow_exclusive` is nonzero, a legacy
++// exclusive handle may be used as a fallback on browsers that lack
++// non-exclusive ("readwrite-unsafe") access handles; otherwise such browsers
++// report failure so the caller can fall back to a Blob.
+ void _wasmfs_opfs_open_access(em_proxying_ctx* ctx,
+                               int file_id,
+-                              int* access_id);
++                              int* access_id,
++                              int allow_exclusive);
+ 
+ void _wasmfs_opfs_open_blob(em_proxying_ctx* ctx, int file_id, int* blob_id);
+ 
