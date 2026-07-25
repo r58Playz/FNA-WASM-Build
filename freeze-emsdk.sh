@@ -145,8 +145,12 @@ with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
 
             info = zipfile.ZipInfo.from_file(full, arc)
             info.external_attr = st.st_mode << 16
+            # ZipInfo.from_file() defaults compress_type to ZIP_STORED, which
+            # overrides the ZipFile-level compression=ZIP_DEFLATED. Force
+            # DEFLATE per entry so files are actually compressed.
+            info.compress_type = zipfile.ZIP_DEFLATED
             with open(full, "rb") as f:
-                zf.writestr(info, f.read())
+                zf.writestr(info, f.read(), compresslevel=9)
 PY
 
 echo "frozen emsdk zip created: $OUTPUT_ZIP"
