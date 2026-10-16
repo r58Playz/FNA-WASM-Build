@@ -47,95 +47,55 @@ int64_t _sysconf(int32_t name) { return sysconf(name); }
 
 int32_t _uname(void *x) { return uname(x); }
 
-static InterpMethod *ftnptr_to_imethod_local(gpointer ftnptr) {
+/*
+ * MonoMod's WasmDetourFactory (MonoMod.Core/Platforms/WasmDetourFactory.cs) calls these by P/Invoke. They are thin
+ * shims over the runtime's body-replacement primitive (dotnet-runtime-jspi, mini/interp/tiering.c mono_body_*): the
+ * runtime installs the detour stub, sets NoInlining, retires every compilation of the old body -- interpreter, its
+ * tier-up, the wasm JIT's -- and routes new calls to the new one. The P/Invoke surface MonoMod uses is unchanged.
+ *
+ * What went away: imethod->transformed = 0 (re-transformed an InterpMethod other threads were running, and did
+ * nothing for the JIT), the image->has_updates toggling around header reads (other threads briefly saw the original
+ * IL), the (image, token) table the replaced hot-reload component served headers from (hit every instantiation of a
+ * generic method; wrappers and SRE methods have no token), and the in-place IL overwrite (tore the IL under a
+ * concurrent transform). Undo now invalidates too; it used not to.
+ */
+extern int mono_body_set_il (MonoMethod *target, const guint8 *blob, guint32 len, int flags);
+extern int mono_body_clear (MonoMethod *target, int flags);
+#define MONO_BODY_HOOK 1
+
+/* The method a function pointer names, without creating anything: a MonoFtnDesc in llvm-only mode, else a (tagged)
+ * InterpMethod. */
+static MonoMethod *ftnptr_to_method(gpointer ftnptr) {
   if (!ftnptr)
     return NULL;
-
-  if (mono_llvm_only) {
-    MonoFtnDesc *ftndesc = (MonoFtnDesc *)ftnptr;
-    if (!ftndesc || !ftndesc->method)
-      return NULL;
-
-    if (!ftndesc->interp_method) {
-      InterpMethod *imethod = mono_interp_get_imethod(ftndesc->method);
-      ftndesc->interp_method = imethod;
-    }
-
-    return INTERP_IMETHOD_UNTAG_UNBOX(ftndesc->interp_method);
-  }
-
-  return INTERP_IMETHOD_UNTAG_UNBOX(ftnptr);
+  if (mono_llvm_only)
+    return ((MonoFtnDesc *)ftnptr)->method;
+  return INTERP_IMETHOD_UNTAG_UNBOX(ftnptr)->method;
 }
 
-MonoMethodHeader *get_header(gpointer ftnptr) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  if (!mono || !mono->method)
-    return NULL;
-  if (mono->method->klass)
-    mono_class_get_image(mono->method->klass)->has_updates = FALSE;
-  MonoMethodHeader *header = mono_method_get_header(mono->method);
-  if (mono->method->klass)
-    mono_class_get_image(mono->method->klass)->has_updates = TRUE;
-  return header;
-}
+/* Kept for the MagicOverwrite strategy's P/Invoke surface; that strategy is never chosen now (magicdetour2allowed
+ * accepts every method with a body), so these report "no IL to overwrite". */
+const void *magictranslate(gpointer ftnptr) { return NULL; }
 
-const void *magictranslate(gpointer ftnptr) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  MonoMethodHeader *header = get_header(ftnptr);
-  if (!header)
-    return NULL;
+uint32_t magictranslatelen(gpointer ftnptr) { return 0; }
 
-  const void *code = header->code;
-
-  mono_metadata_free_mh(header);
-  return code;
-}
-
-uint32_t magictranslatelen(gpointer ftnptr) {
-  MonoMethodHeader *header = get_header(ftnptr);
-  if (!header)
-    return 0;
-
-  uint32_t code_size = header->code_size;
-
-  mono_metadata_free_mh(header);
-  return code_size;
-}
-
-void magicinvalidate(gpointer ftnptr) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  if (!mono)
-    return;
-  mono->transformed = 0;
-}
-
-extern void hot_reload_insert_detour(MonoImage *image, guint32 token,
-                                     gpointer code);
-extern void hot_reload_remove_detour(MonoImage *image, guint32 token);
+/* The install already invalidated (mono_body_set_il / mono_body_clear). */
+void magicinvalidate(gpointer ftnptr) {}
 
 int magicdetour2allowed(gpointer ftnptr) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  if (!mono || !mono->method)
-    return 0;
-  return !mono->method->is_inflated &&
-         mono->method->wrapper_type == MONO_WRAPPER_NONE &&
-         !mono->method->sre_method;
+  MonoMethod *m = ftnptr_to_method(ftnptr);
+  return m && !mono_method_has_no_body(m);
 }
 
 void magicdetour2(gpointer ftnptr, gpointer code) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  if (!mono || !mono->method || !mono->method->klass)
-    return;
-  mono_class_get_image(mono->method->klass)->has_updates = TRUE;
-  hot_reload_insert_detour(mono_class_get_image(mono->method->klass),
-                           mono_metadata_token_index(mono->method->token),
-                           code);
+  MonoMethod *m = ftnptr_to_method(ftnptr);
+  if (m)
+    mono_body_set_il(m, (const guint8 *)code, 0, MONO_BODY_HOOK);
 }
 
 void magicundetour2(gpointer ftnptr) {
-  InterpMethod *mono = ftnptr_to_imethod_local(ftnptr);
-  if (!mono || !mono->method || !mono->method->klass)
-    return;
-  hot_reload_remove_detour(mono_class_get_image(mono->method->klass),
-                           mono_metadata_token_index(mono->method->token));
+  MonoMethod *m = ftnptr_to_method(ftnptr);
+  if (m)
+    mono_body_clear(m, MONO_BODY_HOOK);
 }
+

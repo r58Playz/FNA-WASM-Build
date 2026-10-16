@@ -1,0 +1,181 @@
+Negative lookup cache for the WasmFS OPFS backend. Every miss in OPFSDirectory::getChild is a blocking
+round trip through the OPFS worker and the browser (~260 us in ikvmcraft), where a kernel answers a
+repeated ENOENT from its negative dentry cache; JDK_Canonicalize's realpath() retries probe the same
+missing name once per path component, which cost ~82k round trips (~14 s) of one Minecraft boot. Each
+directory now remembers names the browser reported not found and answers them locally; creates and
+moves through WasmFS drop the name. Entries created behind WasmFS's back (JS using the OPFS API
+directly, another tab) need wasmfs_opfs_invalidate_negative_cache(), declared in emscripten/wasmfs.h
+and exported for JS when the link exports it. wasmfs_opfs_negative_stat() reads the counters.
+Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache check). Rebuild: embuilder build --force libwasmfs*.
+
+--- a/system/lib/wasmfs/backends/opfs_backend.cpp
++++ b/system/lib/wasmfs/backends/opfs_backend.cpp
+@@ -9,6 +9,8 @@
+ #include <string.h>
+ #include <algorithm>
+ #include <atomic>
++#include <string>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "backend.h"
+@@ -112,6 +114,61 @@
+   }
+ };
+ 
++// NEGATIVE LOOKUP CACHE (emsdk.8.patch).
++//
++// Every miss in OPFSDirectory::getChild is a blocking round trip through the OPFS worker and the browser
++// (~260 us measured in ikvmcraft), where a kernel answers a repeated ENOENT from its negative dentry cache.
++// Code that canonicalizes paths through realpath() probes the same missing name once per path component
++// (JDK_Canonicalize retries every shorter prefix), so one missing directory can cost tens of thousands of
++// round trips: 82,189 of them for `/minecraft/file:` during one Minecraft resource reload, ~14 s of boot.
++//
++// So each directory remembers the names the browser reported NOT FOUND (-EEXIST from
++// wasmfsOPFSGetOrCreateFile/Dir; any other failure is not cached) and answers them locally.
++//
++// It is only as fresh as this process's view: a name created through wasmfs in that directory is dropped
++// from the set (insertDataFile/insertDirectory/insertMove), but an entry created BEHIND wasmfs's back --
++// JS calling the OPFS API directly, another tab or worker -- stays invisible until the cache is
++// invalidated. wasmfs_opfs_invalidate_negative_cache() bumps a global generation; each directory drops
++// its set the next time it is consulted under a different generation. It is a single atomic add, safe
++// from any thread including the main browser thread, and exported for JS as
++// Module._wasmfs_opfs_invalidate_negative_cache when the link exports it.
++//
++// Access to a directory's set happens inside getChild/insert*, which wasmfs calls with that directory's
++// lock held, so the set needs no lock of its own.
++static std::atomic<uint32_t> opfsNegGen{1};
++static std::atomic<uint64_t> opfsNegHits{0};       // lookups answered from a set
++static std::atomic<uint64_t> opfsNegInserts{0};    // misses recorded
++static std::atomic<uint64_t> opfsNegInvalidates{0};
++static std::atomic<uint64_t> opfsNegOverflows{0};  // sets cleared for exceeding OPFS_NEG_MAX
++#define OPFS_NEG_MAX 4096                          // names per directory before its set is dropped
++
++struct NegativeNames {
++  std::unordered_set<std::string> names;
++  uint32_t gen = 0;
++
++  void sync() {
++    uint32_t g = opfsNegGen.load(std::memory_order_acquire);
++    if (gen != g) {
++      names.clear();
++      gen = g;
++    }
++  }
++  bool has(const std::string& name) {
++    sync();
++    return names.count(name) != 0;
++  }
++  void add(const std::string& name) {
++    sync();
++    if (names.size() >= OPFS_NEG_MAX) {
++      names.clear();
++      opfsNegOverflows.fetch_add(1, std::memory_order_relaxed);
++    }
++    names.insert(name);
++    opfsNegInserts.fetch_add(1, std::memory_order_relaxed);
++  }
++  void drop(const std::string& name) { names.erase(name); }
++};
++
+ class OpenState {
+ public:
+   enum Kind { None, Access, Blob };
+@@ -424,6 +481,9 @@
+   // The ID of this directory in the JS library.
+   int dirID = 0;
+ 
++  // Names the browser reported missing; see NEGATIVE LOOKUP CACHE.
++  NegativeNames missing;
++
+   OPFSDirectory(mode_t mode, backend_t backend, int dirID, Worker& proxy)
+     : Directory(mode, backend), proxy(proxy), dirID(dirID) {}
+ 
+@@ -437,6 +497,10 @@
+ 
+ private:
+   std::shared_ptr<File> getChild(const std::string& name) override {
++    if (missing.has(name)) {
++      opfsNegHits.fetch_add(1, std::memory_order_relaxed);
++      return NULL;
++    }
+     OpfsTimer _t(OPFS_OP_DIR);
+     int childType = 0, childID = 0;
+     proxy([&](auto ctx) {
+@@ -445,6 +509,10 @@
+     });
+     if (childID < 0) {
+       // TODO: More fine-grained error reporting.
++      if (childID == -EEXIST) {
++        // NotFoundError (library_wasmfs_opfs.js maps it to EEXIST).
++        missing.add(name);
++      }
+       return NULL;
+     }
+     if (childType == 1) {
+@@ -459,6 +527,7 @@
+ 
+   std::shared_ptr<DataFile> insertDataFile(const std::string& name,
+                                            mode_t mode) override {
++    missing.drop(name);
+     OpfsTimer _t(OPFS_OP_DIR);
+     int childID = 0;
+     proxy([&](auto ctx) {
+@@ -473,6 +542,7 @@
+ 
+   std::shared_ptr<Directory> insertDirectory(const std::string& name,
+                                              mode_t mode) override {
++    missing.drop(name);
+     OpfsTimer _t(OPFS_OP_DIR);
+     int childID = 0;
+     proxy([&](auto ctx) {
+@@ -493,6 +563,7 @@
+   }
+ 
+   int insertMove(const std::string& name, std::shared_ptr<File> file) override {
++    missing.drop(name);
+     OpfsTimer _t(OPFS_OP_DIR);
+     int err = 0;
+     if (file->is<DataFile>()) {
+@@ -612,6 +683,26 @@
+   return 0;
+ }
+ 
++/* Forget every name any OPFS directory has cached as missing (see NEGATIVE LOOKUP CACHE). Call it after creating
++ * OPFS entries without going through wasmfs -- JS using the OPFS API directly, another tab -- or they stay
++ * invisible to this process. One atomic add; safe from any thread, including the main browser thread. */
++EMSCRIPTEN_KEEPALIVE void wasmfs_opfs_invalidate_negative_cache(void) {
++  opfsNegGen.fetch_add(1, std::memory_order_acq_rel);
++  opfsNegInvalidates.fetch_add(1, std::memory_order_relaxed);
++}
++
++/* The negative cache's counters: 0 = lookups answered from it, 1 = misses recorded, 2 = invalidations,
++ * 3 = per-directory sets dropped for exceeding OPFS_NEG_MAX. */
++EMSCRIPTEN_KEEPALIVE double wasmfs_opfs_negative_stat(int what) {
++  switch (what) {
++    case 0: return (double)opfsNegHits.load(std::memory_order_relaxed);
++    case 1: return (double)opfsNegInserts.load(std::memory_order_relaxed);
++    case 2: return (double)opfsNegInvalidates.load(std::memory_order_relaxed);
++    case 3: return (double)opfsNegOverflows.load(std::memory_order_relaxed);
++    default: return 0;
++  }
++}
++
+ backend_t wasmfs_create_opfs_backend() {
+   // ProxyWorker cannot safely be synchronously spawned from the main browser
+   // thread. See comment in thread_utils.h for more details.
+--- a/system/include/emscripten/wasmfs.h
++++ b/system/include/emscripten/wasmfs.h
+@@ -72,6 +72,12 @@
+ // thread.
+ backend_t wasmfs_create_opfs_backend(void);
+ 
++// The OPFS backend caches the names a directory lookup found missing. Call this
++// after creating OPFS entries without going through WasmFS (JS using the OPFS
++// API directly, another tab), or they stay invisible until the next call. Safe
++// from any thread. (emsdk.8.patch)
++void wasmfs_opfs_invalidate_negative_cache(void);
++
+ // Creates a generic JSIMPL backend in the new file system.
+ backend_t wasmfs_create_jsimpl_backend(void);
+ 

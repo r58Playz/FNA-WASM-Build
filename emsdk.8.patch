@@ -1,0 +1,274 @@
+WasmFS OPFS backend: blocked-time accounting. Each proxy() round trip to the OPFS worker is timed per op
+kind (count, blocked nanoseconds, bytes, a latency histogram with a 2 ms edge at the WasmFS proxy heartbeat),
+read from JS through wasmfs_opfs_stat(kind, field) / wasmfs_opfs_stat_shape(what) -- ikvmcraft exports both
+(-Wl,--export-if-defined) and its harness prints them as OPFS_BLOCKED. This was applied to the frozen emsdk
+on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh reproduces it.
+
+--- a/system/lib/wasmfs/backends/opfs_backend.cpp
++++ b/system/lib/wasmfs/backends/opfs_backend.cpp
+@@ -3,10 +3,12 @@
+ // University of Illinois/NCSA Open Source License.  Both these licenses can be
+ // found in the LICENSE file.
+ 
++#include <emscripten.h>
+ #include <emscripten/threading.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <algorithm>
++#include <atomic>
+ #include <vector>
+ 
+ #include "backend.h"
+@@ -44,6 +46,72 @@
+ #endif
+ };
+ 
++// BLOCKED-TIME ACCOUNTING
++//
++// The op COUNT has been instrumented since 2026-08 (see the read-ahead-cache note below) and it was never
++// converted into TIME. That left the central question about this backend unanswered for a month: ~100,000
++// blocking cross-thread round trips is either ~2.5 s of the run or ~300 s of it, and the two answers imply
++// opposite decisions. Counting is not measuring.
++//
++// So each `proxy(...)` below -- which BLOCKS the calling thread until the dedicated OPFS worker runs the op
++// and replies -- is wrapped in a timer, accumulated per op kind, plus a coarse latency histogram.
++//
++// WHY THE HISTOGRAM BUCKETS ARE WHERE THEY ARE. From OPFS_STATS checkpoint pacing over 280 archived runs
++// (2026-09-07) the floor is ~22 us and every run contains a stretch at ~3 ms. The 2 ms bucket boundary is
++// deliberate: 2 ms is the WasmFS proxy heartbeat interval (library_wasmfs.js), which is the FALLBACK
++// delivery path taken whenever the mailbox notification is late. So mass at or above the 2 ms bucket is
++// evidence that ops are waiting for the heartbeat rather than for the work, and that is a different fix
++// (delivery) from making each op cheaper (batching, caching). Nothing else here can separate those two.
++//
++// COST: one `emscripten_get_now()` pair and one relaxed atomic add per op, against an op that already
++// blocks on a futex round trip. Relaxed ordering because these are statistics -- no other state depends on
++// them, so there is nothing to order against, and this must not introduce a barrier into the FS path.
++//
++// RESOLUTION CAVEAT: `emscripten_get_now()` is `performance.now()`, which Chrome coarsens to 5 us in a
++// cross-origin-isolated context (this app is, it needs SharedArrayBuffer). So a single sub-5-us reading is
++// not meaningful; the totals over ~100,000 ops are, and the bucket boundaries are all well above it.
++enum OpfsOpKind {
++  OPFS_OP_READ = 0,
++  OPFS_OP_WRITE,
++  OPFS_OP_GETSIZE,
++  OPFS_OP_SETSIZE,
++  OPFS_OP_FLUSH,
++  OPFS_OP_OPEN,
++  OPFS_OP_CLOSE,
++  OPFS_OP_DIR,
++  OPFS_OP_KINDS
++};
++// Upper edges in microseconds; the last bucket is everything above the previous edge.
++static const double OPFS_LAT_EDGE_US[] = {25.0, 100.0, 500.0, 2000.0, 8000.0};
++#define OPFS_LAT_BUCKETS 6
++
++static std::atomic<uint64_t> opfsOpCount[OPFS_OP_KINDS];
++static std::atomic<uint64_t> opfsOpNanos[OPFS_OP_KINDS];
++static std::atomic<uint64_t> opfsOpBytes[OPFS_OP_KINDS];
++static std::atomic<uint64_t> opfsOpLat[OPFS_OP_KINDS][OPFS_LAT_BUCKETS];
++
++// RAII so an early `return` inside a switch arm cannot skip the accounting -- several of the paths below
++// return straight out of the middle of an op.
++struct OpfsTimer {
++  OpfsOpKind kind;
++  double t0;
++  uint64_t bytes;
++  explicit OpfsTimer(OpfsOpKind k, uint64_t b = 0)
++    : kind(k), t0(emscripten_get_now()), bytes(b) {}
++  ~OpfsTimer() {
++    double us = (emscripten_get_now() - t0) * 1000.0;
++    if (us < 0) us = 0;
++    opfsOpCount[kind].fetch_add(1, std::memory_order_relaxed);
++    opfsOpNanos[kind].fetch_add((uint64_t)(us * 1000.0), std::memory_order_relaxed);
++    if (bytes) opfsOpBytes[kind].fetch_add(bytes, std::memory_order_relaxed);
++    int b = OPFS_LAT_BUCKETS - 1;
++    for (int i = 0; i < OPFS_LAT_BUCKETS - 1; i++) {
++      if (us < OPFS_LAT_EDGE_US[i]) { b = i; break; }
++    }
++    opfsOpLat[kind][b].fetch_add(1, std::memory_order_relaxed);
++  }
++};
++
+ class OpenState {
+ public:
+   enum Kind { None, Access, Blob };
+@@ -57,6 +125,7 @@
+   Kind getKind() { return kind; }
+ 
+   int open(Worker& proxy, int fileID, oflags_t flags) {
++    OpfsTimer _t(OPFS_OP_OPEN);
+     if (kind == None) {
+       assert(openCount == 0);
+       switch (flags) {
+@@ -118,6 +187,7 @@
+   }
+ 
+   int close(Worker& proxy) {
++    OpfsTimer _t(OPFS_OP_CLOSE);
+     // TODO: Downgrade to Blob access once the last writable file descriptor has
+     // been closed.
+     int err = 0;
+@@ -190,6 +260,7 @@
+ 
+   ~OPFSFile() override {
+     assert(state.getKind() == OpenState::None);
++    OpfsTimer _t(OPFS_OP_CLOSE);
+     proxy([&]() { _wasmfs_opfs_free_file(fileID); });
+   }
+ 
+@@ -203,6 +274,7 @@
+ 
+   // The uncached read, shared by read() and the cache fill.
+   ssize_t readDirect(uint8_t* buf, size_t len, off_t offset) {
++    OpfsTimer _t(OPFS_OP_READ, len);
+     // TODO: use an i64 here.
+     int32_t nread;
+     switch (state.getKind()) {
+@@ -231,6 +303,9 @@
+     if (cachedSize >= 0) {
+       return cachedSize;
+     }
++    /* Below the memo check on purpose: a memo hit performs no round trip, so counting it would inflate the
++     * op count and deflate the mean latency -- and the memo's whole value is the trips it removes. */
++    OpfsTimer _t(OPFS_OP_GETSIZE);
+     off_t size;
+     switch (state.getKind()) {
+       case OpenState::None:
+@@ -257,6 +332,7 @@
+   }
+ 
+   int setSize(off_t size) override {
++    OpfsTimer _t(OPFS_OP_SETSIZE);
+     dropCache();
+     int err = 0;
+     switch (state.getKind()) {
+@@ -310,6 +386,7 @@
+ 
+   ssize_t write(const uint8_t* buf, size_t len, off_t offset) override {
+     assert(state.getKind() == OpenState::Access);
++    OpfsTimer _t(OPFS_OP_WRITE, len);
+     // Drop before the write, not after: the write can fail partway and leave the file changed regardless, and a
+     // cache that survives a failed write is the worst of both.
+     dropCache();
+@@ -323,6 +400,7 @@
+   }
+ 
+   int flush() override {
++    OpfsTimer _t(OPFS_OP_FLUSH);
+     int err = 0;
+     switch (state.getKind()) {
+       case OpenState::Access:
+@@ -350,6 +428,7 @@
+     : Directory(mode, backend), proxy(proxy), dirID(dirID) {}
+ 
+   ~OPFSDirectory() override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     // Never free the root directory ID.
+     if (dirID != 0) {
+       proxy([&]() { _wasmfs_opfs_free_directory(dirID); });
+@@ -358,6 +437,7 @@
+ 
+ private:
+   std::shared_ptr<File> getChild(const std::string& name) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     int childType = 0, childID = 0;
+     proxy([&](auto ctx) {
+       _wasmfs_opfs_get_child(
+@@ -379,6 +459,7 @@
+ 
+   std::shared_ptr<DataFile> insertDataFile(const std::string& name,
+                                            mode_t mode) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     int childID = 0;
+     proxy([&](auto ctx) {
+       _wasmfs_opfs_insert_file(ctx.ctx, dirID, name.c_str(), &childID);
+@@ -392,6 +473,7 @@
+ 
+   std::shared_ptr<Directory> insertDirectory(const std::string& name,
+                                              mode_t mode) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     int childID = 0;
+     proxy([&](auto ctx) {
+       _wasmfs_opfs_insert_directory(ctx.ctx, dirID, name.c_str(), &childID);
+@@ -411,6 +493,7 @@
+   }
+ 
+   int insertMove(const std::string& name, std::shared_ptr<File> file) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     int err = 0;
+     if (file->is<DataFile>()) {
+       auto opfsFile = std::static_pointer_cast<OPFSFile>(file);
+@@ -428,6 +511,7 @@
+   }
+ 
+   int removeChild(const std::string& name) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     int err = 0;
+     proxy([&](auto ctx) {
+       _wasmfs_opfs_remove_child(ctx.ctx, dirID, name.c_str(), &err);
+@@ -444,6 +528,7 @@
+   }
+ 
+   Directory::MaybeEntries getEntries() override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     std::vector<Directory::Entry> entries;
+     int err = 0;
+     proxy([&](auto ctx) {
+@@ -469,6 +554,7 @@
+   }
+ 
+   std::shared_ptr<Directory> createDirectory(mode_t mode) override {
++    OpfsTimer _t(OPFS_OP_DIR);
+     proxy([](auto ctx) { _wasmfs_opfs_init_root_directory(ctx.ctx); });
+     return std::make_shared<OPFSDirectory>(mode, this, 1, proxy);
+   }
+@@ -483,6 +569,49 @@
+ 
+ extern "C" {
+ 
++/*
++ * READ THE BLOCKED-TIME COUNTERS. One flat accessor rather than a struct, because the caller is JS reading
++ * through `Module._wasmfs_opfs_stat` and a struct would mean agreeing a memory layout across the boundary.
++ *
++ * `kind` is an OpfsOpKind, or -1 for the sum over all kinds -- so a caller can take the total without
++ * knowing how many kinds exist, which is what makes "do the parts sum to the whole" checkable from JS
++ * instead of being asserted in a comment.
++ *
++ * `field`: 0 = op count, 1 = total blocked NANOSECONDS, 2 = bytes moved, 3+k = count in latency bucket k.
++ *
++ * WHY THIS REPLACES THE err() PRINT. The OPFS_STATS line in library_wasmfs_opfs.js fires every 8192 reads,
++ * which has two consequences that invalidated a month of readings: the reported `reads` is always a
++ * multiple of 8192 and is a FLOOR (the "reads = 98304" in the note above is the twelfth checkpoint, not a
++ * total), and nothing at all is printed after the last read checkpoint -- so `writes` read 3-13 and `flush`
++ * read 0 for the entire project, which is an artefact of the trigger and NOT evidence that the write path
++ * is unused. A pull-based accessor has neither problem: the harness reads it at each phase boundary.
++ */
++EMSCRIPTEN_KEEPALIVE double wasmfs_opfs_stat(int kind, int field) {
++  auto one = [&](int k) -> double {
++    if (k < 0 || k >= OPFS_OP_KINDS) return 0;
++    if (field == 0) return (double)opfsOpCount[k].load(std::memory_order_relaxed);
++    if (field == 1) return (double)opfsOpNanos[k].load(std::memory_order_relaxed);
++    if (field == 2) return (double)opfsOpBytes[k].load(std::memory_order_relaxed);
++    int b = field - 3;
++    if (b >= 0 && b < OPFS_LAT_BUCKETS) return (double)opfsOpLat[k][b].load(std::memory_order_relaxed);
++    return 0;
++  };
++  if (kind >= 0) return one(kind);
++  double sum = 0;
++  for (int k = 0; k < OPFS_OP_KINDS; k++) sum += one(k);
++  return sum;
++}
++
++/* Shape of the table, so JS never hardcodes it: 0 = number of op kinds, 1 = number of latency buckets,
++ * 2+k = upper edge of bucket k in microseconds (the last bucket has no upper edge and reads 0). */
++EMSCRIPTEN_KEEPALIVE double wasmfs_opfs_stat_shape(int what) {
++  if (what == 0) return OPFS_OP_KINDS;
++  if (what == 1) return OPFS_LAT_BUCKETS;
++  int i = what - 2;
++  if (i >= 0 && i < (int)(sizeof(OPFS_LAT_EDGE_US) / sizeof(OPFS_LAT_EDGE_US[0]))) return OPFS_LAT_EDGE_US[i];
++  return 0;
++}
++
+ backend_t wasmfs_create_opfs_backend() {
+   // ProxyWorker cannot safely be synchronously spawned from the main browser
+   // thread. See comment in thread_utils.h for more details.

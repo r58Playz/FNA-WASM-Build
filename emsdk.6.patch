@@ -1,0 +1,79 @@
+Subject: [PATCH] [wasmfs] fetch backend: getSize from a HEAD request, not a full download
+
+A stat() on a fetch-backed file downloaded the whole file and kept it in wasmFS$JSMemoryFiles forever.
+ikvmcraft: IKVM stats /dlls/<name>.dll (java.io.File.toURI -> isDirectory) when getPackage() first runs on an
+ikvmc assembly, which fetched and retained ikvmc_lwjgl3 (82.8 MB), jvmdowngrader and log4j (5.5 MB each) at boot.
+getSize now uses Content-Length from a HEAD request (only without Content-Encoding) and caches it; a read
+still fetches the file. Anything else falls back to the old full fetch.
+
+--- a/src/library_wasmfs_fetch.js	2026-09-29 17:55:55.105325718 -0700
++++ b/src/library_wasmfs_fetch.js	2026-09-29 17:55:55.131215324 -0700
+@@ -9,22 +9,18 @@
+   // will fetch() the data from the network asynchronously. Otherwise, after
+   // that fetch it behaves just like JSFile (and it reuses the code from there).
+ 
++  $wasmFS$fetchSizes: {},
+   _wasmfs_create_fetch_backend_js__deps: [
+     '$wasmFS$backends',
+     '$wasmFS$JSMemoryFiles',
++    '$wasmFS$fetchSizes',
+     '_wasmfs_create_js_file_backend_js',
+     '_wasmfs_fetch_get_file_path',
+   ],
+   _wasmfs_create_fetch_backend_js: async function(backend) {
+     // Get a promise that fetches the data and stores it in JS memory (if it has
+     // not already been fetched).
+-    async function getFile(file) {
+-      if (wasmFS$JSMemoryFiles[file]) {
+-        // The data is already here, so nothing to do before we continue on to
+-        // the actual read below.
+-        return Promise.resolve();
+-      }
+-      // This is the first time we want the file's data.
++    function getUrl(file) {
+       var url = '';
+       var fileUrl_p = __wasmfs_fetch_get_file_path(file);
+       var fileUrl = UTF8ToString(fileUrl_p);
+@@ -38,7 +34,16 @@
+         } catch (e) {
+         }
+       }
+-      var response = await fetch(url);
++      return url;
++    }
++    async function getFile(file) {
++      if (wasmFS$JSMemoryFiles[file]) {
++        // The data is already here, so nothing to do before we continue on to
++        // the actual read below.
++        return Promise.resolve();
++      }
++      // This is the first time we want the file's data.
++      var response = await fetch(getUrl(file));
+       if (response.ok) {
+         var buffer = await response['arrayBuffer']();
+         wasmFS$JSMemoryFiles[file] = new Uint8Array(buffer);
+@@ -79,7 +84,24 @@
+         }
+         return jsFileOps.read(file, buffer, length, offset);
+       },
++      // getSize answers from a HEAD request when it can, so a stat() does not
++      // download (and retain) the whole file; a read still fetches it.
+       getSize: async (file) => {
++        if (!wasmFS$JSMemoryFiles[file]) {
++          var known = wasmFS$fetchSizes[file];
++          if (known !== undefined) return known;
++          try {
++            var head = await fetch(getUrl(file), { method: 'HEAD' });
++            var len = head.headers.get('Content-Length');
++            if (head.ok && len !== null && !head.headers.get('Content-Encoding')) {
++              var n = Number(len);
++              if (Number.isSafeInteger(n) && n >= 0) {
++                wasmFS$fetchSizes[file] = n;
++                return n;
++              }
++            }
++          } catch (e) {}
++        }
+         try {
+           await getFile(file);
+         } catch (response) {}

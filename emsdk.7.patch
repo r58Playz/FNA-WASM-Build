@@ -1,0 +1,64 @@
+Backport of emscripten 21a3a81daf (#24565): don't execute the system proxying queue while this
+thread holds its mutex in do_proxy. On the main browser thread a contended malloc inside
+get_or_add_tasks_for_thread yields into emscripten_proxy_execute_queue, which re-locked the same
+non-recursive mutex: a self-deadlock (ikvmcraft boot hang, main thread spinning at 100%).
+
+--- a/system/lib/pthread/proxying.c
++++ b/system/lib/pthread/proxying.c
+@@ -35,6 +35,14 @@
+   .capacity = 0,
+ };
+ 
++// Backport of emscripten 21a3a81daf (#24565, "Don't execute the proxy queue while adding to it from same thread"):
++// set while this thread executes the system queue OR holds its mutex in do_proxy. do_proxy can malloc under that
++// mutex (get_or_add_tasks_for_thread); on the main browser thread a contended malloc lock spins in
++// futex_wait_main_browser_thread, which yields into emscripten_proxy_execute_queue on the system queue, which then
++// locked the mutex this thread already held -- a self-deadlock that hung ikvmcraft's boot with the main thread at
++// 100% (j2d/w5/z2, R479).
++static _Thread_local int system_queue_in_use = 0;
++
+ em_proxying_queue* emscripten_proxy_get_system_queue(void) {
+   return &system_proxying_queue;
+ }
+@@ -113,14 +121,14 @@
+   // Recursion guard to avoid infinite recursion when we arrive here from the
+   // pthread_lock call below that executes the system queue. The per-task_queue
+   // recursion lock can't catch these recursions because it can only be checked
+-  // after the lock has been acquired.
+-  static _Thread_local int executing_system_queue = 0;
++  // after the lock has been acquired. It also covers this thread holding the
++  // system queue's mutex in do_proxy (see system_queue_in_use).
+   int is_system_queue = q == &system_proxying_queue;
+   if (is_system_queue) {
+-    if (executing_system_queue) {
++    if (system_queue_in_use) {
+       return;
+     }
+-    executing_system_queue = 1;
++    system_queue_in_use = 1;
+   }
+ 
+   pthread_mutex_lock(&q->mutex);
+@@ -133,14 +141,21 @@
+   }
+ 
+   if (is_system_queue) {
+-    executing_system_queue = 0;
++    system_queue_in_use = 0;
+   }
+ }
+ 
+ static int do_proxy(em_proxying_queue* q, pthread_t target_thread, task t) {
+   assert(q != NULL);
+   pthread_mutex_lock(&q->mutex);
++  int is_system_queue = q == &system_proxying_queue;
++  if (is_system_queue) {
++    system_queue_in_use = 1;
++  }
+   em_task_queue* tasks = get_or_add_tasks_for_thread(q, target_thread);
++  if (is_system_queue) {
++    system_queue_in_use = 0;
++  }
+   pthread_mutex_unlock(&q->mutex);
+   if (tasks == NULL) {
+     return 0;

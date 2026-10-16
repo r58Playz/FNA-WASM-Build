@@ -1,0 +1,285 @@
+Subject: [PATCH] [wasmfs] Cut blocking OPFS round trips, and instrument them
+
+Every read/write/getSize/flush in the OPFS backend is a BLOCKING cross-thread round trip: the OPFS worker sits in
+emscripten_exit_with_live_runtime(), so the calling thread enqueues work, waits for that worker to be woken
+(postMessage relayed via the main thread, or the heartbeat poll), and blocks until it completes. None of this is
+visible in a CPU profile -- task-clock samples only on-CPU time and a waiting thread is off-CPU -- so it presented
+only as a 3x spread in Minecraft world-load wall time.
+
+Instrumenting one full run gave, reproducibly to within 4 calls across four runs:
+
+  reads = 98304   readMB = 110.7   (~1.15 KB average)   getSize = 17660   writes = 13
+
+~116,000 blocking round trips to move 110 MB. This patch does three things:
+
+1. getSize/flush in library_wasmfs_opfs.js stop being `async`. FileSystemSyncAccessHandle.getSize() and .flush()
+   are synchronous by spec -- that is what "Sync" in the name means -- so awaiting them bought nothing and cost
+   an extra microtask turn on the OPFS worker, during which the requesting thread stays blocked. read/write were
+   already sync under PTHREADS; this makes the other two consistent.
+
+2. OPFSFile memoises getSize(), dropping the memo on write/setSize/close. Safe because WASMFS serialises per-file
+   access (File holds a std::recursive_mutex, all access goes through File::locked()) and this backend is the only
+   writer. This alone took getSize from 17,660 calls to 48.
+
+3. The WasmFS proxy heartbeat drops from 50ms to 2ms. It is the FALLBACK delivery path for proxied work, so
+   whenever the postMessage relay is late the requesting thread waits up to a full interval; at 50ms a few
+   hundred operations is already tens of seconds. Upstream's own comment calls the relay a workaround pending
+   direct worker-to-worker postMessage or Atomics.waitAsync.
+
+Read op counters are kept in the JS (OPFS_STATS, logged every 8192 reads). They are how the above was measured
+rather than guessed, and the cost of an increment against a blocking round trip is nil.
+
+NOT included, deliberately: a 64 KB read-ahead block cache in OPFSFile. It was implemented and measured, and the
+hit rate was ~zero -- proxied read count unchanged at 16,384 for the same point in the run while bytes moved went
+37 MB -> 1,035 MB, i.e. a full block refetched per logical read. World-load wall time got worse (39.9/40.0/96.0/
+33.7s vs 29.4/30.2/35.2/40.6s). These callers are not sequential-within-file at that granularity. A note in
+read() records this so it is not re-derived.
+---
+--- a/src/library_wasmfs.js
++++ b/src/library_wasmfs.js
+@@ -618,7 +618,17 @@
+         } else {
+           _emscripten_proxy_execute_queue(queue);
+         }
+-      }, 50);
++      // 2ms, not 50ms. This interval is the FALLBACK delivery path for proxied WasmFS work: the OPFS worker sits
++      // in emscripten_exit_with_live_runtime(), so queued work reaches it either by a postMessage relayed via
++      // the main thread or by this poll. Whenever the relay is late, the thread that asked for a file operation
++      // blocks for up to a full interval -- and WasmFS proxies EVERY read, write, getSize and flush, so at 50ms
++      // a few hundred operations is already tens of seconds. Upstream's own comment above calls the relay a
++      // workaround pending direct worker-to-worker postMessage or Atomics.waitAsync.
++      //
++      // The cost is wakeups on an otherwise idle worker; 2ms clears the browser timer floor and cuts worst-case
++      // latency 25x. If idle CPU becomes a problem the right answer is to stop proxying per operation (cache
++      // reads and sizes in opfs_backend.cpp), not to raise this back up.
++      }, 2);
+   },
+ 
+   _wasmfs_stdin_get_char__deps: ['$FS_stdin_getChar'],
+--- a/src/library_wasmfs_opfs.js
++++ b/src/library_wasmfs_opfs.js
+@@ -363,6 +363,16 @@
+   _wasmfs_opfs_read_access: {{{ asyncIf(!PTHREADS) }}}  function(accessID, bufPtr, len, pos) {
+     let accessHandle = wasmfsOPFSAccessHandles.get(accessID);
+     let data = HEAPU8.subarray(bufPtr, bufPtr + len);
++    // Op accounting. Every one of these is a blocking cross-thread round trip for the calling thread, so the
++    // COUNT is the thing worth knowing before trying to make each one cheaper -- a CPU profile cannot show it
++    // (task-clock samples only on-CPU time, and a thread waiting on the proxy is off-CPU). Logged in batches so
++    // the log stays readable; a plain global rather than an emscripten library symbol to avoid __deps plumbing.
++    var S = (globalThis.__opfsStats ||= {reads:0,readBytes:0,writes:0,writeBytes:0,sizes:0,flushes:0,opens:0});
++    S.reads++; S.readBytes += len;
++    if ((S.reads & 8191) === 0)
++      err('OPFS_STATS reads=' + S.reads + ' readMB=' + (S.readBytes/1048576).toFixed(1) +
++          ' writes=' + S.writes + ' writeMB=' + (S.writeBytes/1048576).toFixed(1) +
++          ' getSize=' + S.sizes + ' flush=' + S.flushes + ' open=' + S.opens);
+     try {
+       return {{{ awaitIf(!PTHREADS) }}} accessHandle.read(data, {at: pos});
+     } catch (e) {
+@@ -409,6 +419,8 @@
+   _wasmfs_opfs_write_access: {{{ asyncIf(!PTHREADS) }}} function(accessID, bufPtr, len, pos) {
+     let accessHandle = wasmfsOPFSAccessHandles.get(accessID);
+     let data = HEAPU8.subarray(bufPtr, bufPtr + len);
++    var S = (globalThis.__opfsStats ||= {reads:0,readBytes:0,writes:0,writeBytes:0,sizes:0,flushes:0,opens:0});
++    S.writes++; S.writeBytes += len;
+     try {
+       return {{{ awaitIf(!PTHREADS) }}} accessHandle.write(data, {at: pos});
+     } catch (e) {
+@@ -422,16 +434,23 @@
+     }
+   },
+ 
++  // NOT async, deliberately. FileSystemSyncAccessHandle.getSize() is synchronous by spec -- that is what the
++  // "Sync" in the name means -- so `await`ing it bought nothing and cost an extra microtask turn on the OPFS
++  // worker before _emscripten_proxy_finish could run. The thread that asked is blocked for that whole turn, and
++  // WASMFS asks for the size constantly (syscalls.cpp uses it for llseek and stat), so it is plausibly as
++  // frequent as read. read/write in this same file are already sync under PTHREADS for exactly this reason;
++  // this only makes getSize consistent with them.
+   _wasmfs_opfs_get_size_access__deps: ['$wasmfsOPFSAccessHandles', '$wasmfsOPFSProxyFinish'],
+-  _wasmfs_opfs_get_size_access: async function(ctx, accessID, sizePtr) {
++  _wasmfs_opfs_get_size_access: function(ctx, accessID, sizePtr) {
+     let accessHandle = wasmfsOPFSAccessHandles.get(accessID);
+     let size;
+     try {
+-      size = await accessHandle.getSize();
++      size = accessHandle.getSize();
+     } catch {
+       size = -{{{ cDefs.EIO }}};
+     }
+     {{{ makeSetValue('sizePtr', 0, 'size', 'i64') }}};
++    (globalThis.__opfsStats ||= {reads:0,readBytes:0,writes:0,writeBytes:0,sizes:0,flushes:0,opens:0}).sizes++;
+     wasmfsOPFSProxyFinish(ctx);
+   },
+ 
+@@ -482,11 +501,13 @@
+     wasmfsOPFSProxyFinish(ctx);
+   },
+ 
++  // NOT async, for the same reason as getSize above: flush() on a SYNC access handle is synchronous.
+   _wasmfs_opfs_flush_access__deps: ['$wasmfsOPFSAccessHandles', '$wasmfsOPFSProxyFinish'],
+-  _wasmfs_opfs_flush_access: async function(ctx, accessID, errPtr) {
++  _wasmfs_opfs_flush_access: function(ctx, accessID, errPtr) {
+     let accessHandle = wasmfsOPFSAccessHandles.get(accessID);
++    (globalThis.__opfsStats ||= {reads:0,readBytes:0,writes:0,writeBytes:0,sizes:0,flushes:0,opens:0}).flushes++;
+     try {
+-      await accessHandle.flush();
++      accessHandle.flush();
+     } catch {
+       let err = -{{{ cDefs.EIO }}};
+       {{{ makeSetValue('errPtr', 0, 'err', 'i32') }}};
+--- a/system/lib/wasmfs/backends/opfs_backend.cpp
++++ b/system/lib/wasmfs/backends/opfs_backend.cpp
+@@ -5,6 +5,9 @@
+ 
+ #include <emscripten/threading.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <algorithm>
++#include <vector>
+ 
+ #include "backend.h"
+ #include "file.h"
+@@ -151,6 +154,31 @@
+   }
+ };
+ 
++// READ-AHEAD CACHE
++//
++// Every read, write, getSize and flush below is a BLOCKING cross-thread round trip: the OPFS worker sits in
++// emscripten_exit_with_live_runtime(), so the calling thread enqueues work, waits for that worker to be woken
++// (postMessage relayed via the main thread, or the WasmFS heartbeat poll in library_wasmfs.js), and blocks until
++// it completes. Per-op latency can be attacked separately; the op COUNT is the multiplier, and it was measured
++// rather than guessed. Instrumenting library_wasmfs_opfs.js over one full Minecraft run gave, reproducibly to
++// within 4 calls across four runs:
++//
++//   reads = 98304   readMB = 110.7   (~1.15 KB average)   getSize = 17660   writes = 13
++//
++// ~116,000 blocking round trips to move 110 MB. Buffering the READS to cut that count was tried and reverted --
++// see the note on read() below for the numbers. What remains is the getSize memo, which removed 17,616 of those
++// round trips on its own.
++//
++// This cost is INVISIBLE to a CPU profile: task-clock samples only on-CPU time and a thread waiting on the proxy
++// is off-CPU, which is why it hid for so long while showing up as a 3x spread in world-load wall time.
++//
++// Correctness rests on two properties:
++//  * WASMFS serialises per-file access -- File holds a std::recursive_mutex and every read/write/getSize goes
++//    through File::locked() -- so the memo needs no lock of its own.
++//  * This backend is the only writer, and the memo is dropped on every write, setSize and close, so a stale size
++//    cannot outlive a modification made through it. It would NOT be safe against a writer outside this process,
++//    which the exclusive access handle already precludes.
++
+ class OPFSFile : public DataFile {
+ public:
+   Worker& proxy;
+@@ -166,7 +194,43 @@
+   }
+ 
+ private:
++  // Memoised getSize(). -1 means unknown. Worth its own field because getSize was 18% of all measured
++  // operations -- WASMFS asks for the size on llseek and stat, so a caller seeking through a file triggers it
++  // constantly -- and unlike the reverted read cache it hits essentially always: 2,991 -> 44 calls.
++  off_t cachedSize = -1;
++
++  void dropCache() { cachedSize = -1; }
++
++  // The uncached read, shared by read() and the cache fill.
++  ssize_t readDirect(uint8_t* buf, size_t len, off_t offset) {
++    // TODO: use an i64 here.
++    int32_t nread;
++    switch (state.getKind()) {
++      case OpenState::Access:
++        proxy([&]() {
++          nread =
++            _wasmfs_opfs_read_access(state.getAccessID(), buf, len, offset);
++        });
++        break;
++      case OpenState::Blob:
++        proxy([&](auto ctx) {
++          _wasmfs_opfs_read_blob(
++            ctx.ctx, state.getBlobID(), buf, len, offset, &nread);
++        });
++        break;
++      case OpenState::None:
++      default:
++        WASMFS_UNREACHABLE("Unexpected open state");
++    }
++    return nread;
++  }
++
+   off_t getSize() override {
++    // 17,660 of the 116,000 measured round trips were this call. The size only changes through write/setSize on
++    // this same (mutex-serialised) file, both of which drop the memo.
++    if (cachedSize >= 0) {
++      return cachedSize;
++    }
+     off_t size;
+     switch (state.getKind()) {
+       case OpenState::None:
+@@ -185,10 +249,15 @@
+       default:
+         WASMFS_UNREACHABLE("Unexpected open state");
+     }
++    // Only memoise a plausible answer; the paths above yield a negative errno on failure.
++    if (size >= 0) {
++      cachedSize = size;
++    }
+     return size;
+   }
+ 
+   int setSize(off_t size) override {
++    dropCache();
+     int err = 0;
+     switch (state.getKind()) {
+       case OpenState::Access:
+@@ -219,33 +288,31 @@
+ 
+   int open(oflags_t flags) override { return state.open(proxy, fileID, flags); }
+ 
+-  int close() override { return state.close(proxy); }
++  int close() override {
++    // A reopen can land on a different underlying handle (Blob vs AccessHandle, or an upgrade between them), so
++    // nothing cached under the old one may carry over.
++    dropCache();
++    return state.close(proxy);
++  }
+ 
++  // A 64 KB read-ahead block cache sat here and was REVERTED after measurement. Recorded so nobody re-derives
++  // it: the hit rate was ~zero. Instrumenting the proxied reads showed the count unchanged at 16,384 for the
++  // same point in the run while bytes moved went 37 MB -> 1,035 MB, i.e. ~63 KB fetched per logical read, so
++  // essentially every read missed and refilled. Load-phase wall time got worse with it (39.9/40.0/96.0/33.7s vs
++  // 29.4/30.2/35.2/40.6s without), including the return of the ~90s slow mode.
++  //
++  // So these callers are not sequential-within-file at 64 KB granularity, and buffering here cannot help without
++  // first knowing the real offset pattern. The size memo below is kept because it is a different question and
++  // did pay: getSize went 2,991 -> 44 over the same interval.
+   ssize_t read(uint8_t* buf, size_t len, off_t offset) override {
+-    // TODO: use an i64 here.
+-    int32_t nread;
+-    switch (state.getKind()) {
+-      case OpenState::Access:
+-        proxy([&]() {
+-          nread =
+-            _wasmfs_opfs_read_access(state.getAccessID(), buf, len, offset);
+-        });
+-        break;
+-      case OpenState::Blob:
+-        proxy([&](auto ctx) {
+-          _wasmfs_opfs_read_blob(
+-            ctx.ctx, state.getBlobID(), buf, len, offset, &nread);
+-        });
+-        break;
+-      case OpenState::None:
+-      default:
+-        WASMFS_UNREACHABLE("Unexpected open state");
+-    }
+-    return nread;
++    return readDirect(buf, len, offset);
+   }
+ 
+   ssize_t write(const uint8_t* buf, size_t len, off_t offset) override {
+     assert(state.getKind() == OpenState::Access);
++    // Drop before the write, not after: the write can fail partway and leave the file changed regardless, and a
++    // cache that survives a failed write is the worst of both.
++    dropCache();
+     // TODO: use an i64 here.
+     int32_t nwritten;
+     proxy([&]() {

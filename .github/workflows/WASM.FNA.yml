@@ -148,7 +148,8 @@ jobs:
           git clone https://github.com/kcat/openal-soft -b ${{ env.OPENAL_VERSION }}
           cd openal-soft
           cd build
-          emcmake cmake .. -GNinja \
+          PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
+          CFLAGS="-fwasm-exceptions $PTHREAD_FLAGS" CXXFLAGS="-fwasm-exceptions $PTHREAD_FLAGS" emcmake cmake .. -GNinja \
             -DLIBTYPE=STATIC \
             -DALSOFT_EMBED_HRTF_DATA=ON \
             -DALSOFT_BACKEND_SDL3=ON \
