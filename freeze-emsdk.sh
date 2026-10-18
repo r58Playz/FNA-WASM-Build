@@ -84,6 +84,8 @@ apply_patch "${SCRIPT_DIR}/emsdk.6.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.7.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.8.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.9.patch"
+apply_patch "${SCRIPT_DIR}/emsdk.10.patch"
+apply_patch "${SCRIPT_DIR}/emsdk.11.patch"
 
 EMSDK_CACHE="$EMSDK_SRC/emscripten/cache"
 EMSDK_SYSROOT_LIB="$EMSDK_CACHE/sysroot/lib/wasm32-emscripten"

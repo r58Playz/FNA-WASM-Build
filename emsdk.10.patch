@@ -1,0 +1,107 @@
+O(1) in-use byte counter for dlmalloc. mallinfo().uordblks walks every chunk under the malloc lock (and can spin
+forever on a corrupt chunk), so a page's memory monitor could not poll it. dlmalloc now keeps the bytes of its in-use
+chunks (chunk sizes, headers included) at the public entry points -- dlmalloc, dlfree, the in-place paths of dlrealloc
+and dlrealloc_in_place (the moving path is dlmalloc + dlfree), internal_memalign's returned leader/trailer and
+internal_bulk_free (a merged run uncounted once, when disposed) -- with one relaxed atomic each; size_t emscripten_dlmalloc_inuse(void) reads it. ialloc carves one
+counted chunk into pieces that dlfree uncounts one by one, so it needs nothing. The mspace_* copies are untouched
+(MSPACES is 0 in emscripten). Checked: equals mallinfo().uordblks exactly through 400k random calls of every instrumented entry point.
+Rebuild: embuilder build --force libdlmalloc*.
+
+--- a/system/lib/dlmalloc.c	2026-10-17 19:39:37.481741639 -0700
++++ b/system/lib/dlmalloc.c	2026-10-17 19:39:37.483376221 -0700
+@@ -44,6 +44,19 @@
+ 
+ #endif // __EMSCRIPTEN__
+ 
++#if __EMSCRIPTEN__
++/* XXX Emscripten XXX (ikvmcraft emsdk.10.patch): bytes in in-use chunks (chunk sizes, headers included), kept at the
++   public entry points with one relaxed atomic each, so a memory monitor can read the live total in O(1).
++   mallinfo().uordblks gives the same number by walking every chunk under the malloc lock. */
++static size_t dl_inuse_bytes;
++#define DL_INUSE_ADD(n) __atomic_fetch_add(&dl_inuse_bytes, (size_t)(n), __ATOMIC_RELAXED)
++#define DL_INUSE_SUB(n) __atomic_fetch_sub(&dl_inuse_bytes, (size_t)(n), __ATOMIC_RELAXED)
++size_t emscripten_dlmalloc_inuse(void) { return __atomic_load_n(&dl_inuse_bytes, __ATOMIC_RELAXED); }
++#else
++#define DL_INUSE_ADD(n) ((void)0)
++#define DL_INUSE_SUB(n) ((void)0)
++#endif
++
+ 
+ #define __THROW
+ #define __attribute_malloc__
+@@ -4759,6 +4772,8 @@
+         
+     postaction:
+         POSTACTION(gm);
++        if (mem != 0)
++            DL_INUSE_ADD(chunksize(mem2chunk(mem)));
+ #if __EMSCRIPTEN__
+         /* XXX Emscripten Tracing API. */
+         emscripten_trace_record_allocation(mem, bytes);
+@@ -4784,6 +4799,7 @@
+         emscripten_trace_record_free(mem);
+ #endif
+         mchunkptr p  = mem2chunk(mem);
++        DL_INUSE_SUB(chunksize(p));
+ #if FOOTERS
+         mstate fm = get_mstate_for(p);
+         if (!ok_magic(fm)) {
+@@ -5003,6 +5019,7 @@
+         mem = internal_malloc(m, req);
+         if (mem != 0) {
+             mchunkptr p = mem2chunk(mem);
++            size_t counted = chunksize(p);
+             if (PREACTION(m))
+                 return 0;
+             if ((((size_t)(mem)) & (alignment - 1)) != 0) { /* misaligned */
+@@ -5051,6 +5068,7 @@
+             assert (chunksize(p) >= nb);
+             assert(((size_t)mem & (alignment - 1)) == 0);
+             check_inuse_chunk(m, p);
++            DL_INUSE_SUB(counted - chunksize(p));
+             POSTACTION(m);
+         }
+     }
+@@ -5216,8 +5234,11 @@
+                         set_inuse(m, p, newsize);
+                         *b = chunk2mem(p);
+                     }
+-                    else
++                    else {
++                        /* a merged run is uncounted once, whole, when it is finally disposed */
++                        DL_INUSE_SUB(psize);
+                         dispose_chunk(m, p, psize);
++                    }
+                 }
+                 else {
+                     CORRUPTION_ERROR_ACTION(m);
+@@ -5303,11 +5324,14 @@
+             return 0;
+         }
+ #endif /* FOOTERS */
++        size_t oldsize = chunksize(oldp);
+         if (!PREACTION(m)) {
+             mchunkptr newp = try_realloc_chunk(m, oldp, nb, 1);
+             POSTACTION(m);
+             if (newp != 0) {
+                 check_inuse_chunk(m, newp);
++                DL_INUSE_ADD(chunksize(newp));
++                DL_INUSE_SUB(oldsize);
+                 mem = chunk2mem(newp);
+ #if __EMSCRIPTEN__
+                 /* XXX Emscripten Tracing API. */
+@@ -5345,11 +5369,14 @@
+                 return 0;
+             }
+ #endif /* FOOTERS */
++            size_t oldsize = chunksize(oldp);
+             if (!PREACTION(m)) {
+                 mchunkptr newp = try_realloc_chunk(m, oldp, nb, 0);
+                 POSTACTION(m);
+                 if (newp == oldp) {
+                     check_inuse_chunk(m, newp);
++                    DL_INUSE_ADD(chunksize(newp));
++                    DL_INUSE_SUB(oldsize);
+                     mem = oldmem;
+                 }
+             }

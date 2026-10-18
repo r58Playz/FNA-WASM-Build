@@ -1,0 +1,27 @@
+Zero a new pthread's stack along with its struct, TLS and TSD. pthread_create left the stack part of the thread block
+uninitialized, so a block recycled from freed memory started with stale bytes and a stack census could only bound a
+thread's deepest frame from above (ikvmcraft R501 read 5-8 MiB "deep" stacks that were stale data; their real
+high-water marks were <= 128 KiB). Zeroed, the lowest non-zero word of a thread's stack is its exact high-water mark.
+Cost: one memset of the stack size per pthread_create (none when the caller supplies the stack). Rebuild:
+embuilder build --force libc-mt libc-mt-debug libc_optz-mt libc_optz-mt-debug (and the -asan variants).
+
+--- a/system/lib/pthread/pthread_create.c	2026-10-17 19:21:15.769416280 -0700
++++ b/system/lib/pthread/pthread_create.c	2026-10-17 19:21:15.770304531 -0700
+@@ -160,10 +160,14 @@
+     size += attr._a_stacksize + STACK_ALIGN - 1;
+   }
+ 
+-  // Allocate all the data for the new thread and zero-initialize all parts
+-  // except for the stack.
++  // Allocate all the data for the new thread and zero-initialize all of it,
++  // the stack included (ikvmcraft emsdk.11.patch): a block recycled from freed
++  // memory otherwise starts its stack with stale bytes, so a census cannot tell
++  // how deep a thread's stack has ever been -- the lowest non-zero word of a
++  // zeroed stack is its exact high-water mark. One memset of the stack size per
++  // pthread_create.
+   unsigned char* block = emscripten_builtin_malloc(size);
+-  memset(block, 0, zero_size);
++  memset(block, 0, attr._a_stackaddr ? zero_size : size);
+ 
+   uintptr_t offset = (uintptr_t)block;
+ 
