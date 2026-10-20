@@ -30,6 +30,28 @@ on:
   workflow_dispatch:
       
 jobs:
+  resolve-runtime:
+    runs-on: ubuntu-latest
+    name: Resolve patched runtime revisions
+    outputs:
+      runtime_sha: ${{ steps.resolve.outputs.runtime_sha }}
+      jit_sha: ${{ steps.resolve.outputs.jit_sha }}
+    steps:
+      - name: Resolve each branch once for all producers
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPOSITORY=https://github.com/r58playz/dotnet-runtime
+          for entry in "runtime_sha:$DOTNET_RUNTIME_VERSION" "jit_sha:$DOTNET_RUNTIME_JIT_VERSION"; do
+            KEY=${entry%%:*}
+            BRANCH=${entry#*:}
+            SHA=$(git ls-remote --exit-code "$REPOSITORY" "refs/heads/$BRANCH" | cut -f1)
+            [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+            echo "$KEY=$SHA" >> "$GITHUB_OUTPUT"
+            echo "$BRANCH: $SHA" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   build:
     strategy:
       matrix:
@@ -38,7 +60,7 @@ jobs:
     name: Build SDL3, SDL2, FNA natives, OpenSSL (pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: ${{ env.EMSDK_VERSION }}
@@ -192,6 +214,7 @@ jobs:
           path: Binaries/
 
   build-dotnet:
+    needs: resolve-runtime
     strategy:
       matrix:
         pthread_enabled: [true, false]
@@ -199,7 +222,7 @@ jobs:
     name: Build dotnet (pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: ${{ env.EMSDK_VERSION }}
@@ -209,11 +232,16 @@ jobs:
           sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers ripgrep
       - name: Verify
         run: emcc -v
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          path: liba/runtime
       - name: LibA
         shell: bash
         run: |
           cd liba/
-          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
           emcc liba.c -r -o liba.o \
             -DHOST_BROWSER -DHOST_WASM -DTARGET_WASM \
             -Iruntime/src/mono/ -Iruntime/src/mono/mono/ -Iruntime/src/native/public/ -Iruntime/src/mono/mono/eglib/ -Iruntime/src/native/ -I.
@@ -240,6 +268,7 @@ jobs:
           path: Binaries/
 
   build-dotnet-jit:
+    needs: resolve-runtime
     strategy:
       matrix:
         jspi_enabled: [true, false]
@@ -247,7 +276,7 @@ jobs:
     name: Build dotnet (pthread=true, wasm_jit=true, JSPI=${{ matrix.jspi_enabled }})
     steps:
       - name: Check out source
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: ${{ env.EMSDK_VERSION }}
@@ -257,11 +286,12 @@ jobs:
           sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git lldb libicu-dev liblttng-ust-dev libssl-dev libkrb5-dev pigz cpio spirv-headers ripgrep
       - name: Verify
         run: emcc -v
-      - name: LibA
-        shell: bash
-        run: |
-          cd liba/
-          git clone -b ${{ env.DOTNET_RUNTIME_JIT_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.jit_sha }}
+          path: liba/runtime
       - name: dotnet
         shell: bash
         env:
@@ -281,19 +311,25 @@ jobs:
           path: Binaries/
 
   freeze-emsdk:
+    needs: resolve-runtime
     runs-on: ubuntu-latest
     name: Freeze emsdk
     steps:
       - name: Check out source
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt -y update
           sudo apt install -y build-essential python-is-python3 curl git patch libicu-dev
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          path: runtime
       - name: Provision emsdk via mono buildsystem
         shell: bash
         run: |
-          git clone -b ${{ env.DOTNET_RUNTIME_VERSION }} --depth=1 https://github.com/r58playz/dotnet-runtime runtime
           cd runtime
           ./build.sh -os browser -s mono.emsdk -c Release
       - name: Freeze emsdk
@@ -311,6 +347,118 @@ jobs:
           name: WASM-emsdk
           path: Binaries/
 
+  freeze-emsdk-macos:
+    needs: resolve-runtime
+    runs-on: macos-26
+    name: Freeze emsdk (macOS ARM64)
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          path: runtime
+      - name: Verify native ARM64 host
+        run: test "$(uname -m)" = arm64
+      - name: Provision matching .NET Emscripten SDK
+        shell: bash
+        run: |
+          cd runtime
+          # Keep the fork's 3.1.56 toolchain / 10.0.0 transport packages.
+          ./build.sh -os browser -s mono.emsdk -c Release
+      - name: Verify native SDK tools
+        shell: bash
+        run: |
+          SDK="$PWD/runtime/src/mono/browser/emsdk"
+          for TOOL in bin/clang-19 bin/wasm-ld bin/wasm-opt node/bin/node; do
+            test "$(lipo -archs "$SDK/$TOOL")" = arm64
+            otool -L "$SDK/$TOOL"
+          done
+          source "$SDK/emsdk_env.sh"
+          "$SDK/emscripten/emcc" --version
+          "$SDK/node/bin/node" --version
+      - name: Apply patches and freeze SDK/cache
+        run: ./freeze-emsdk.sh ./runtime ./emsdk-osx-arm64.zip
+      - name: Test frozen SDK after relocation (ST/MT)
+        shell: bash
+        run: |
+          unzip -q emsdk-osx-arm64.zip -d sdk-smoke
+          SDK="$PWD/sdk-smoke/emsdk"
+          source "$SDK/emsdk_env.sh"
+          cat > sdk-smoke/smoke.c <<'C'
+          #include <stdio.h>
+          int main(void) { puts("emsdk smoke ok"); return 0; }
+          C
+          for MODE in st mt; do
+            FLAGS=()
+            if [[ "$MODE" == mt ]]; then
+              FLAGS+=(-pthread -sPROXY_TO_PTHREAD=1 -sEXIT_RUNTIME=1)
+            fi
+            "$SDK/emscripten/emcc" sdk-smoke/smoke.c "${FLAGS[@]}" \
+              -sENVIRONMENT=node,worker -sSINGLE_FILE=1 -o "sdk-smoke/smoke-$MODE.js"
+            "$SDK/node/bin/node" "sdk-smoke/smoke-$MODE.js"
+          done
+      - name: Archive macOS emsdk
+        uses: actions/upload-artifact@v4
+        with:
+          name: WASM-emsdk-osx-arm64
+          path: emsdk-osx-arm64.zip
+          if-no-files-found: error
+
+  build-dotnet-cross-macos:
+    needs: resolve-runtime
+    runs-on: macos-26
+    name: Build patched cross compilers (macOS ARM64, ST/MT/JIT MT)
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          path: runtime-st
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          path: runtime-mt
+      - name: Check out pinned runtime
+        uses: actions/checkout@v4
+        with:
+          repository: r58playz/dotnet-runtime
+          ref: ${{ needs.resolve-runtime.outputs.jit_sha }}
+          path: runtime-jit-mt
+      - name: Verify build prerequisites
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          xcode-select -p
+          cmake --version
+          ninja --version
+      - name: Validate archive assembly and dylib relocation
+        run: python3 -m unittest discover -p 'test_macos_artifacts.py' -v
+      - name: Build three isolated compiler configurations sequentially
+        shell: bash
+        run: |
+          # Bootstrap once, then reuse the SDK for the other two checkouts.
+          export DOTNET_INSTALL_DIR="$PWD/runtime-st/.dotnet"
+          ./build-macos-cross.sh ./runtime-st false ./cross-compilers/st
+          ./build-macos-cross.sh ./runtime-mt true ./cross-compilers/mt
+          # JSPI changes the browser payload, not this compiler configuration.
+          ./build-macos-cross.sh ./runtime-jit-mt true ./cross-compilers/jit-mt
+      - name: Preserve compiler executable permissions in tar
+        run: tar -czf dotnet-cross-osx-arm64.tar.gz -C cross-compilers st mt jit-mt
+      - name: Archive macOS cross compilers
+        uses: actions/upload-artifact@v4
+        with:
+          name: WASM-dotnet-cross-osx-arm64
+          path: dotnet-cross-osx-arm64.tar.gz
+          if-no-files-found: error
+
   build-gdiplus:
     strategy:
       matrix:
@@ -319,7 +467,7 @@ jobs:
     name: Build libgdiplus + System.Drawing.Common (pthread=${{ matrix.pthread_enabled }})
     steps:
       - name: Check out source
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: ${{ env.EMSDK_VERSION }}
@@ -679,9 +827,11 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build, build-dotnet, build-dotnet-jit, build-gdiplus, freeze-emsdk]
+    needs: [build, build-dotnet, build-dotnet-jit, build-gdiplus, freeze-emsdk, freeze-emsdk-macos, build-dotnet-cross-macos]
     name: Create Release
     steps:
+      - name: Check out assembly scripts
+        uses: actions/checkout@v4
       - name: Generate Release Name
         run: echo RELEASE_NAME=$(uuidgen) >> $GITHUB_ENV
       - name: Download all artifacts
@@ -694,6 +844,13 @@ jobs:
           find artifacts/ -type f | while read file; do
             cp "$file" release_assets/
           done
+      - name: Assemble complete macOS runtime ZIPs from Linux payloads
+        shell: bash
+        run: |
+          python3 -m unittest discover -p 'test_macos_artifacts.py' -v
+          mkdir cross-compilers
+          tar -xzf artifacts/WASM-dotnet-cross-osx-arm64/dotnet-cross-osx-arm64.tar.gz -C cross-compilers
+          python3 ./assemble-macos-dotnet.py artifacts cross-compilers release_assets
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:

@@ -97,19 +97,24 @@ for tfm in net10.0 net472; do
     echo "warn: $TASKS_OUT/$tfm/WasmAppBuilder.dll missing, skipping" >&2
     continue
   fi
-  cp -a "$TASKS_OUT/$tfm/WasmAppBuilder.dll" "$STAGE_DIR/tasks/$tfm/"
-  # deps.json is needed for net10.0 (Core) to resolve dependencies. For net472
-  # MSBuild it's not used. Copy when present.
-  if [[ -f "$TASKS_OUT/$tfm/WasmAppBuilder.deps.json" ]]; then
-    cp -a "$TASKS_OUT/$tfm/WasmAppBuilder.deps.json" "$STAGE_DIR/tasks/$tfm/"
-  fi
-  # WasmAppBuilder uses Microsoft.NET.WebAssembly.Webcil; SDK nupkg ships it
-  # alongside the task. Match that layout so the resolver doesn't pull a
-  # mismatched copy from the host SDK.
-  if [[ -f "$TASKS_OUT/$tfm/Microsoft.NET.WebAssembly.Webcil.dll" ]]; then
-    cp -a "$TASKS_OUT/$tfm/Microsoft.NET.WebAssembly.Webcil.dll" "$STAGE_DIR/tasks/$tfm/"
-  fi
+  # Preserve the task's full dependency closure, including net472 companions.
+  cp -a "$TASKS_OUT/$tfm/." "$STAGE_DIR/tasks/$tfm/"
 done
+
+python3 - "$RUNTIME_ROOT" "$PTHREAD_FLAG" "$WASM_ENABLE_JSPI" "$STAGE_DIR/runtime-build.json" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+root, threads, jspi, destination = sys.argv[1:]
+manifest = {
+    "runtime_sha": subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
+    "wasm_enable_threads": threads == "true",
+    "wasm_enable_jspi": jspi == "true",
+}
+Path(destination).write_text(json.dumps(manifest, indent=2) + "\n")
+PY
 
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_ZIP"

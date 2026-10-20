@@ -25,6 +25,8 @@ This fork contains a few patches (and uses SDL3 as the base):
 - `dotnet.patch` patches the dotnet runtime so MonoMod can be used.
 - `glib.patch` disables gio, fuzzing, tools, and docs subdirectories in glib to allow building for WASM without unsupported dependencies.
 
+It also builds dotnet for macOS, combining macos built mono aot cross with linux built dlls.
+
 ## Usage
 
 Go to the Actions tab and download the .zip artifact from the latest workflow run.  
@@ -32,7 +34,7 @@ Go to the Actions tab and download the .zip artifact from the latest workflow ru
 
 ## Frozen emsdk artifact
 
-The workflow also produces `emsdk-frozen.zip` (pthread=true build). This archive is a frozen copy of
+The workflow also produces `emsdk.zip` on Linux and `emsdk-osx-arm64.zip` on macOS. Each archive is a frozen copy of
 `src/mono/browser/emsdk` from the patched runtime build, including dotnet-style `emsdk_env` and `.emscripten`
 configuration. It is intended for consumers that need emsdk behavior to match dotnet runtime packaging.
 
