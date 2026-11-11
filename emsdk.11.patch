@@ -5,9 +5,13 @@ high-water marks were <= 128 KiB). Zeroed, the lowest non-zero word of a thread'
 Cost: one memset of the stack size per pthread_create (none when the caller supplies the stack). Rebuild:
 embuilder build --force libc-mt libc-mt-debug libc_optz-mt libc_optz-mt-debug (and the -asan variants).
 
---- a/system/lib/pthread/pthread_create.c	2026-10-17 19:21:15.769416280 -0700
-+++ b/system/lib/pthread/pthread_create.c	2026-10-17 19:21:15.770304531 -0700
-@@ -160,10 +160,14 @@
+Ported to emscripten 6.0.2 (fna-6.0.2 41a72a4); paths are emscripten 6's src/lib/lib*.js.
+
+diff --git a/system/lib/pthread/pthread_create.c b/system/lib/pthread/pthread_create.c
+index 9940267..eb5abde 100644
+--- a/system/lib/pthread/pthread_create.c
++++ b/system/lib/pthread/pthread_create.c
+@@ -148,10 +148,14 @@ int __pthread_create(pthread_t* restrict res,
      size += attr._a_stacksize + STACK_ALIGN - 1;
    }
  

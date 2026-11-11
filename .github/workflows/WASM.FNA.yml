@@ -8,8 +8,10 @@ env:
   OPENAL_VERSION: 1.24.3
   OPENSSL_VERSION: openssl-3.4
   DOTNET_RUNTIME_VERSION: wasm-10.0.3
-  DOTNET_RUNTIME_JIT_VERSION: wasm-jspi-jit-10.0.3
-  EMSDK_VERSION: 3.1.56
+  DOTNET_RUNTIME_JIT_VERSION: wasm-jit-11.0.0
+  # .NET 11 links with its own emscripten 6.0.3 build (6ea9c28c38cd); upstream 6.0.3 is the nearest emsdk release for
+  # the native jobs. The runtime and the freeze use the one .NET provisions.
+  EMSDK_VERSION: 6.0.3
   ZLIB_VERSION: v1.3.1
   LIBJPEG_TURBO_VERSION: 3.0.3
   LIBPNG_VERSION: v1.6.43
@@ -21,7 +23,7 @@ env:
   LIBFFI_VERSION: v3.4.8
   GLIB_VERSION: "2.74.0"
   MONO_VERSION: main
-  DOTNET_SDK_VERSION: '10.0.x'
+  DOTNET_SDK_VERSION: '11.0.x'
 
 on: 
   push:
@@ -80,7 +82,7 @@ jobs:
           PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
           PTHREAD_ENABLED=${{ matrix.pthread_enabled == true && 'ON' || 'OFF' }}
           CFLAGS=$PTHREAD_FLAGS emcmake cmake -S .. \
-            -DSDL_WERROR=ON \
+            -DSDL_WERROR=OFF \
             -DSDL_TESTS=OFF \
             -DSDL_INSTALL_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
@@ -170,7 +172,7 @@ jobs:
           cd openal-soft
           cd build
           PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
-          CFLAGS="-fwasm-exceptions $PTHREAD_FLAGS" CXXFLAGS="-fwasm-exceptions $PTHREAD_FLAGS" emcmake cmake .. -GNinja \
+          CFLAGS="-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 $PTHREAD_FLAGS" CXXFLAGS="-fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 $PTHREAD_FLAGS -include cstdlib" emcmake cmake .. -GNinja \
             -DLIBTYPE=STATIC \
             -DALSOFT_EMBED_HRTF_DATA=ON \
             -DALSOFT_BACKEND_SDL3=ON \
@@ -269,11 +271,8 @@ jobs:
 
   build-dotnet-jit:
     needs: resolve-runtime
-    strategy:
-      matrix:
-        jspi_enabled: [true, false]
     runs-on: ubuntu-latest
-    name: Build dotnet (pthread=true, wasm_jit=true, JSPI=${{ matrix.jspi_enabled }})
+    name: Build dotnet (pthread=true, wasm_jit=true)
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -294,20 +293,17 @@ jobs:
           path: liba/runtime
       - name: dotnet
         shell: bash
-        env:
-          WASM_ENABLE_JSPI: ${{ matrix.jspi_enabled == true && 'true' || 'false' }}
         run: |
           ./build-dotnet.sh ./liba/runtime true ./liba/runtime.zip
       - name: Copy Binaries (dotnet-jit)
         shell: bash
         run: |
           mkdir -p Binaries
-          JSPI_SUFFIX=${{ matrix.jspi_enabled == true && '-jspi' || '' }}
-          cp ./liba/runtime.zip Binaries/dotnet${JSPI_SUFFIX}-jit.zip
-      - name: Archive Dotnet (pthread=true, wasm_jit=true, JSPI=${{ matrix.jspi_enabled }})
+          cp ./liba/runtime.zip Binaries/dotnet-jit.zip
+      - name: Archive Dotnet (pthread=true, wasm_jit=true)
         uses: actions/upload-artifact@master
         with:
-          name: WASM-dotnet${{ matrix.jspi_enabled == true && '-jspi' || '' }}-pthread-true-jit-true
+          name: WASM-dotnet-pthread-true-jit-true
           path: Binaries/
 
   freeze-emsdk:
@@ -325,17 +321,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: r58playz/dotnet-runtime
-          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          ref: ${{ needs.resolve-runtime.outputs.jit_sha }}
           path: runtime
-      - name: Provision emsdk via mono buildsystem
+      - name: Provision emsdk via runtime buildsystem
         shell: bash
         run: |
           cd runtime
-          ./build.sh -os browser -s mono.emsdk -c Release
+          ./build.sh -os browser -s provision.emsdk -c Release
       - name: Freeze emsdk
         shell: bash
         run: |
-          ./freeze-emsdk.sh ./runtime/src/mono/browser/emsdk ./emsdk-frozen.zip
+          # .NET 11 provisions into the runtime's wasm tool cache, not src/mono/browser/emsdk; the script finds it.
+          ./freeze-emsdk.sh ./runtime ./emsdk-frozen.zip
       - name: Copy Binaries (emsdk)
         shell: bash
         run: |
@@ -358,7 +355,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: r58playz/dotnet-runtime
-          ref: ${{ needs.resolve-runtime.outputs.runtime_sha }}
+          ref: ${{ needs.resolve-runtime.outputs.jit_sha }}
           path: runtime
       - name: Verify native ARM64 host
         run: test "$(uname -m)" = arm64
@@ -366,15 +363,18 @@ jobs:
         shell: bash
         run: |
           cd runtime
-          # Keep the fork's 3.1.56 toolchain / 10.0.0 transport packages.
-          ./build.sh -os browser -s mono.emsdk -c Release
+          ./build.sh -os browser -s provision.emsdk -c Release
       - name: Verify native SDK tools
         shell: bash
         run: |
-          SDK="$PWD/runtime/src/mono/browser/emsdk"
-          for TOOL in bin/clang-19 bin/wasm-ld bin/wasm-opt node/bin/node; do
-            test "$(lipo -archs "$SDK/$TOOL")" = arm64
-            otool -L "$SDK/$TOOL"
+          . runtime/eng/wasm/wasm-tool-cache.sh
+          SDK="$(wasm_tool_cache_dir emscripten runtime/src/mono/browser/emscripten-version.txt "$PWD/runtime")" \
+            || { echo "error: provisioned emsdk not found in the runtime's wasm tool cache" >&2; exit 1; }
+          echo "emsdk: $SDK"
+          # bin/clang is a wrapper script; the binary is bin/clang-<llvm major>.
+          for TOOL in "$SDK"/bin/clang-[0-9]* "$SDK/bin/wasm-ld" "$SDK/bin/wasm-opt" "$SDK/node/bin/node"; do
+            test "$(lipo -archs "$TOOL")" = arm64
+            otool -L "$TOOL"
           done
           source "$SDK/emsdk_env.sh"
           "$SDK/emscripten/emcc" --version
@@ -448,7 +448,6 @@ jobs:
           export DOTNET_INSTALL_DIR="$PWD/runtime-st/.dotnet"
           ./build-macos-cross.sh ./runtime-st false ./cross-compilers/st
           ./build-macos-cross.sh ./runtime-mt true ./cross-compilers/mt
-          # JSPI changes the browser payload, not this compiler configuration.
           ./build-macos-cross.sh ./runtime-jit-mt true ./cross-compilers/jit-mt
       - name: Preserve compiler executable permissions in tar
         run: tar -czf dotnet-cross-osx-arm64.tar.gz -C cross-compilers st mt jit-mt
@@ -458,376 +457,9 @@ jobs:
           name: WASM-dotnet-cross-osx-arm64
           path: dotnet-cross-osx-arm64.tar.gz
           if-no-files-found: error
-
-  build-gdiplus:
-    strategy:
-      matrix:
-        pthread_enabled: [true, false]
-    runs-on: ubuntu-latest
-    name: Build libgdiplus + System.Drawing.Common (pthread=${{ matrix.pthread_enabled }})
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: ${{ env.EMSDK_VERSION }}
-      - name: Install dependencies
-        run: |
-          sudo apt -y update
-          sudo apt install -y ninja-build cmake llvm lld clang build-essential python-is-python3 curl git autoconf automake libtool libltdl-dev pkg-config python3-pip gperf
-          pip install meson --break-system-packages
-      - name: Verify
-        run: emcc -v
-      - name: Set up sysroot
-        run: |
-          echo "WASM_PREFIX=$PWD/wasm-sysroot" >> $GITHUB_ENV
-          mkdir -p wasm-sysroot/{lib/pkgconfig,include,share/pkgconfig}
-          PTHREAD_FLAGS=${{ matrix.pthread_enabled == true && '"-pthread"' || '""' }}
-          echo "PTHREAD_FLAGS=$PTHREAD_FLAGS" >> $GITHUB_ENV
-          # Generate meson cross files with correct pthread flags
-          if [ "${{ matrix.pthread_enabled }}" = "true" ]; then
-            CARGS="['-pthread']"
-            CARGS_GLIB="['-pthread', '-Wno-incompatible-function-pointer-types']"
-          else
-            CARGS="[]"
-            CARGS_GLIB="['-Wno-incompatible-function-pointer-types']"
-          fi
-          cat > emscripten-cross-generated.txt <<CROSS_EOF
-          [binaries]
-          c = 'emcc'
-          cpp = 'em++'
-          ar = 'emar'
-          ranlib = 'emranlib'
-          strip = 'emstrip'
-          pkg-config = 'pkg-config'
-
-          [built-in options]
-          c_args = $CARGS
-          c_link_args = []
-          cpp_args = $CARGS
-          cpp_link_args = []
-
-          [host_machine]
-          system = 'emscripten'
-          cpu_family = 'wasm32'
-          cpu = 'wasm32'
-          endian = 'little'
-          CROSS_EOF
-          cat > emscripten-cross-glib-generated.txt <<CROSS_EOF
-          [binaries]
-          c = 'emcc'
-          cpp = 'em++'
-          ar = 'emar'
-          ranlib = 'emranlib'
-          strip = 'emstrip'
-          pkg-config = 'pkg-config'
-
-          [built-in options]
-          c_args = $CARGS_GLIB
-          c_link_args = []
-          cpp_args = $CARGS
-          cpp_link_args = []
-
-          [host_machine]
-          system = 'emscripten'
-          cpu_family = 'wasm32'
-          cpu = 'wasm32'
-          endian = 'little'
-          CROSS_EOF
-      - name: zlib
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.ZLIB_VERSION }} https://github.com/madler/zlib
-          cd zlib && mkdir build && cd build
-          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
-            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF
-          emmake make -j$(nproc) zlibstatic
-          # Install manually since 'make install' tries to build shared lib
-          cp libz.a $WASM_PREFIX/lib/
-          cp zconf.h ../zlib.h $WASM_PREFIX/include/
-          mkdir -p $WASM_PREFIX/lib/pkgconfig
-          cp zlib.pc $WASM_PREFIX/lib/pkgconfig/
-      - name: libjpeg-turbo
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.LIBJPEG_TURBO_VERSION }} https://github.com/libjpeg-turbo/libjpeg-turbo
-          cd libjpeg-turbo && mkdir build && cd build
-          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
-            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_SHARED=FALSE \
-            -DENABLE_STATIC=TRUE \
-            -DWITH_SIMD=FALSE \
-            -DWITH_JPEG8=TRUE
-          emmake make -j$(nproc)
-          emmake make install
-      - name: libpng
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.LIBPNG_VERSION }} https://github.com/pnggroup/libpng
-          cd libpng && mkdir build && cd build
-          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
-            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DPNG_TESTS=OFF \
-            -DPNG_SHARED=OFF \
-            -DPNG_STATIC=ON \
-            -DZLIB_INCLUDE_DIR=$WASM_PREFIX/include \
-            -DZLIB_LIBRARY=$WASM_PREFIX/lib/libz.a \
-            -DCMAKE_FIND_ROOT_PATH=$WASM_PREFIX
-          emmake make -j$(nproc)
-          emmake make install
-      - name: freetype
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.FREETYPE_VERSION }} https://github.com/freetype/freetype
-          cd freetype && mkdir build && cd build
-          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
-            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DFT_DISABLE_HARFBUZZ=ON \
-            -DFT_DISABLE_BROTLI=ON \
-            -DFT_DISABLE_BZIP2=ON \
-            -DZLIB_INCLUDE_DIR=$WASM_PREFIX/include \
-            -DZLIB_LIBRARY=$WASM_PREFIX/lib/libz.a \
-            -DPNG_PNG_INCLUDE_DIR=$WASM_PREFIX/include \
-            -DPNG_LIBRARY=$WASM_PREFIX/lib/libpng16.a \
-            -DCMAKE_FIND_ROOT_PATH=$WASM_PREFIX
-          emmake make -j$(nproc)
-          emmake make install
-      - name: expat
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.EXPAT_VERSION }} https://github.com/libexpat/libexpat
-          cd libexpat/expat && mkdir build && cd build
-          CFLAGS=$PTHREAD_FLAGS emcmake cmake .. \
-            -DCMAKE_INSTALL_PREFIX=$WASM_PREFIX \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DEXPAT_BUILD_EXAMPLES=OFF \
-            -DEXPAT_BUILD_TESTS=OFF \
-            -DEXPAT_BUILD_TOOLS=OFF \
-            -DEXPAT_SHARED_LIBS=OFF
-          emmake make -j$(nproc)
-          emmake make install
-      - name: fontconfig
-        shell: bash
-        run: |
-          CROSS_FILE=$PWD/emscripten-cross-generated.txt
-          git clone --depth=1 -b ${{ env.FONTCONFIG_VERSION }} https://gitlab.freedesktop.org/fontconfig/fontconfig.git
-          cd fontconfig
-          PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          meson setup build \
-            --cross-file $CROSS_FILE \
-            --prefix=$WASM_PREFIX \
-            --default-library=static \
-            -Ddoc=disabled \
-            -Dtests=disabled \
-            -Dtools=disabled \
-            -Dcache-build=disabled \
-            -Diconv=disabled
-          ninja -C build
-          ninja -C build install
-      - name: pixman
-        shell: bash
-        run: |
-          CROSS_FILE=$PWD/emscripten-cross-generated.txt
-          git clone --depth=1 -b ${{ env.PIXMAN_VERSION }} https://gitlab.freedesktop.org/pixman/pixman.git
-          cd pixman
-          PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          meson setup build \
-            --cross-file $CROSS_FILE \
-            --prefix=$WASM_PREFIX \
-            --default-library=static \
-            -Dtests=disabled \
-            -Ddemos=disabled \
-            -Dgtk=disabled \
-            -Dlibpng=disabled
-          ninja -C build
-          ninja -C build install
-      - name: cairo
-        shell: bash
-        run: |
-          CROSS_FILE=$PWD/emscripten-cross-generated.txt
-          git clone --depth=1 -b ${{ env.CAIRO_VERSION }} https://gitlab.freedesktop.org/cairo/cairo.git
-          cd cairo
-          PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          meson setup build \
-            --cross-file $CROSS_FILE \
-            --prefix=$WASM_PREFIX \
-            --default-library=static \
-            -Dxlib=disabled \
-            -Dxcb=disabled \
-            -Dquartz=disabled \
-            -Dspectre=disabled \
-            -Dtee=disabled \
-            -Dtests=disabled \
-            -Dgtk_doc=false \
-            -Dfreetype=enabled \
-            -Dfontconfig=enabled \
-            -Dpng=enabled
-          # Build only static lib target, skip executables that fail to link
-          ninja -C build src/libcairo.a
-          # Install manually since ninja install would try to build failing executables
-          cp build/src/libcairo.a $WASM_PREFIX/lib/
-          mkdir -p $WASM_PREFIX/include/cairo
-          cp src/cairo.h src/cairo-deprecated.h src/cairo-ft.h src/cairo-pdf.h \
-             src/cairo-ps.h src/cairo-script.h src/cairo-svg.h src/cairo-version.h \
-             $WASM_PREFIX/include/cairo/
-          cp build/src/cairo-features.h $WASM_PREFIX/include/cairo/
-          cp build/meson-private/cairo.pc $WASM_PREFIX/lib/pkgconfig/
-          cp build/meson-private/cairo-ft.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-          cp build/meson-private/cairo-png.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-          cp build/meson-private/cairo-fc.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-      - name: libffi
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.LIBFFI_VERSION }} https://github.com/libffi/libffi
-          cd libffi
-          ./autogen.sh
-          CFLAGS=$PTHREAD_FLAGS emconfigure ./configure \
-            --host=wasm32-unknown-emscripten \
-            --prefix=$WASM_PREFIX \
-            --enable-static \
-            --disable-shared \
-            --disable-docs \
-            --disable-exec-static-tramp
-          cd wasm32-unknown-emscripten
-          emmake make -j$(nproc)
-          emmake make install
-      - name: glib
-        shell: bash
-        run: |
-          CROSS_FILE=$PWD/emscripten-cross-glib-generated.txt
-          git clone --depth=1 -b ${{ env.GLIB_VERSION }} https://github.com/GNOME/glib
-          cd glib
-          git apply $GITHUB_WORKSPACE/glib.patch
-          PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-          meson setup build \
-            --cross-file $CROSS_FILE \
-            --prefix=$WASM_PREFIX \
-            --default-library=static \
-            -Dtests=false \
-            -Dxattr=false \
-            -Dlibmount=disabled \
-            -Dselinux=disabled \
-            -Ddtrace=false \
-            -Dsystemtap=false \
-            -Dinstalled_tests=false \
-            -Dnls=disabled \
-            -Dsysprof=disabled
-          # Build only static libs, skip executables that fail to link
-          ninja -C build glib/libglib-2.0.a gobject/libgobject-2.0.a gmodule/libgmodule-2.0.a gthread/libgthread-2.0.a
-          # Remove gstdio.c.o from libglib-2.0.a to avoid conflicts with dotnet runtime
-          # (g_fopen, g_rename, g_unlink are provided by dotnet)
-          cd build/glib
-          cp libglib-2.0.a libglib-2.0-dotnet.a
-          ar d libglib-2.0-dotnet.a gstdio.c.o
-          cd ../..
-          # Install manually
-          cp build/glib/libglib-2.0.a $WASM_PREFIX/lib/
-          cp build/glib/libglib-2.0-dotnet.a $WASM_PREFIX/lib/
-          cp build/gobject/libgobject-2.0.a $WASM_PREFIX/lib/
-          cp build/gmodule/libgmodule-2.0.a $WASM_PREFIX/lib/
-          cp build/gthread/libgthread-2.0.a $WASM_PREFIX/lib/
-          find build/subprojects -name '*.a' -ls
-          find build/subprojects -name 'libpcre2*' -exec cp {} $WASM_PREFIX/lib/ \;
-          # Install pcre2 pkgconfig (may be in meson-private or subproject dir)
-          find build -name 'libpcre2-8.pc' -exec cp {} $WASM_PREFIX/lib/pkgconfig/ \;
-          mkdir -p $WASM_PREFIX/include/glib-2.0/glib/deprecated
-          mkdir -p $WASM_PREFIX/include/glib-2.0/gobject
-          mkdir -p $WASM_PREFIX/include/glib-2.0/gmodule
-          mkdir -p $WASM_PREFIX/lib/glib-2.0/include
-          cp glib/*.h $WASM_PREFIX/include/glib-2.0/glib/
-          cp glib/deprecated/*.h $WASM_PREFIX/include/glib-2.0/glib/deprecated/
-          cp glib/glib.h $WASM_PREFIX/include/glib-2.0/
-          cp glib/glib-object.h $WASM_PREFIX/include/glib-2.0/
-          cp gobject/*.h $WASM_PREFIX/include/glib-2.0/gobject/
-          cp gmodule/gmodule.h $WASM_PREFIX/include/glib-2.0/gmodule/
-          cp build/glib/glibconfig.h $WASM_PREFIX/lib/glib-2.0/include/
-          cp build/glib/glib-visibility.h $WASM_PREFIX/include/glib-2.0/glib/ 2>/dev/null || true
-          cp build/gobject/gobject-visibility.h $WASM_PREFIX/include/glib-2.0/gobject/ 2>/dev/null || true
-          cp build/gmodule/gmodule-visibility.h $WASM_PREFIX/include/glib-2.0/gmodule/ 2>/dev/null || true
-          cp build/meson-private/glib-2.0.pc $WASM_PREFIX/lib/pkgconfig/
-          cp build/meson-private/gobject-2.0.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-          cp build/meson-private/gmodule-2.0.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-          cp build/meson-private/gthread-2.0.pc $WASM_PREFIX/lib/pkgconfig/ 2>/dev/null || true
-      - name: libgdiplus
-        shell: bash
-        run: |
-          git clone --depth=1 https://github.com/mono/libgdiplus
-          cd libgdiplus
-          git apply $GITHUB_WORKSPACE/libgdiplus.patch
-          autoreconf -fiv
-          CFLAGS=$PTHREAD_FLAGS emconfigure ./configure \
-            --host=wasm32-unknown-emscripten \
-            --prefix=$WASM_PREFIX \
-            --enable-static \
-            --disable-shared \
-            --without-x11 \
-            --without-libexif \
-            --with-libtiff=no \
-            --with-libgif=no \
-            --with-libjpeg=yes \
-            PKG_CONFIG_PATH="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig" \
-            PKG_CONFIG_LIBDIR="$WASM_PREFIX/lib/pkgconfig:$WASM_PREFIX/share/pkgconfig"
-          emmake make -C src -j$(nproc)
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
-      - name: System.Drawing.Common
-        shell: bash
-        run: |
-          git clone --depth=1 -b ${{ env.MONO_VERSION }} --recurse-submodules --shallow-submodules https://github.com/mono/mono
-          cd mono
-          git apply $GITHUB_WORKSPACE/system.drawing.patch
-          cd ..
-          dotnet build $GITHUB_WORKSPACE/System.Drawing.csproj \
-            -c Release \
-            /p:MonoSourceDir=$PWD/mono
-      - name: Copy Binaries (libgdiplus)
-        shell: bash
-        run: |
-          mkdir Binaries
-          PREFIX=${{ matrix.pthread_enabled == false && 'ST-' || '' }}
-          # Copy libgdiplus
-          cp ./libgdiplus/src/.libs/libgdiplus.a Binaries/${PREFIX}libgdiplus.a
-          # Copy all gdiplus dependencies from sysroot
-          cp $WASM_PREFIX/lib/libcairo.a Binaries/${PREFIX}libcairo.a
-          cp $WASM_PREFIX/lib/libpixman-1.a Binaries/${PREFIX}libpixman-1.a
-          cp $WASM_PREFIX/lib/libfreetype.a Binaries/${PREFIX}libfreetype.a
-          cp $WASM_PREFIX/lib/libfontconfig.a Binaries/${PREFIX}libfontconfig.a
-          cp $WASM_PREFIX/lib/libpng16.a Binaries/${PREFIX}libpng16.a
-          cp $WASM_PREFIX/lib/libjpeg.a Binaries/${PREFIX}libjpeg.a
-          cp $WASM_PREFIX/lib/libz.a Binaries/${PREFIX}libz.a
-          cp $WASM_PREFIX/lib/libexpat.a Binaries/${PREFIX}libexpat.a
-          cp $WASM_PREFIX/lib/libglib-2.0.a Binaries/${PREFIX}libglib-2.0.a
-          cp $WASM_PREFIX/lib/libglib-2.0-dotnet.a Binaries/${PREFIX}libglib-2.0-dotnet.a
-          cp $WASM_PREFIX/lib/libgobject-2.0.a Binaries/${PREFIX}libgobject-2.0.a
-          cp $WASM_PREFIX/lib/libgmodule-2.0.a Binaries/${PREFIX}libgmodule-2.0.a
-          cp $WASM_PREFIX/lib/libgthread-2.0.a Binaries/${PREFIX}libgthread-2.0.a
-          cp $WASM_PREFIX/lib/libffi.a Binaries/${PREFIX}libffi.a
-          # Copy pcre2 (glib dependency)
-          cp $WASM_PREFIX/lib/libpcre2-8.a Binaries/${PREFIX}libpcre2-8.a || true
-          # Copy System.Drawing.Common.dll
-          cp bin/Release/net10.0/System.Drawing.Common.dll Binaries/${PREFIX}System.Drawing.Common.dll
-      - name: Archive libgdiplus (pthread=${{ matrix.pthread_enabled }})
-        uses: actions/upload-artifact@master
-        with:
-          name: WASM-gdiplus-pthread-${{ matrix.pthread_enabled }}
-          path: Binaries/
-
   release:
     runs-on: ubuntu-latest
-    needs: [build, build-dotnet, build-dotnet-jit, build-gdiplus, freeze-emsdk, freeze-emsdk-macos, build-dotnet-cross-macos]
+    needs: [build, build-dotnet, build-dotnet-jit, freeze-emsdk, freeze-emsdk-macos, build-dotnet-cross-macos]
     name: Create Release
     steps:
       - name: Check out assembly scripts

@@ -8,6 +8,27 @@ directly, another tab) need wasmfs_opfs_invalidate_negative_cache(), declared in
 and exported for JS when the link exports it. wasmfs_opfs_negative_stat() reads the counters.
 Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache check). Rebuild: embuilder build --force libwasmfs*.
 
+Ported to emscripten 6.0.2 (fna-6.0.2 6ac9c53); paths are emscripten 6's src/lib/lib*.js.
+
+diff --git a/system/include/emscripten/wasmfs.h b/system/include/emscripten/wasmfs.h
+index 24f9951..da181ff 100644
+--- a/system/include/emscripten/wasmfs.h
++++ b/system/include/emscripten/wasmfs.h
+@@ -103,6 +103,12 @@ backend_t wasmfs_create_node_backend(const char* _Nonnull root);
+ // createWritable on it, such as builds without pthreads.
+ backend_t wasmfs_create_opfs_backend(void);
+ 
++// The OPFS backend caches the names a directory lookup found missing. Call this
++// after creating OPFS entries without going through WasmFS (JS using the OPFS
++// API directly, another tab), or they stay invisible until the next call. Safe
++// from any thread. (FNA-WASM-Build emsdk.9.patch)
++void wasmfs_opfs_invalidate_negative_cache(void);
++
+ // Creates a generic JSIMPL backend
+ backend_t wasmfs_create_jsimpl_backend(void);
+ 
+diff --git a/system/lib/wasmfs/backends/opfs_backend.cpp b/system/lib/wasmfs/backends/opfs_backend.cpp
+index e5c1d59..310939b 100644
 --- a/system/lib/wasmfs/backends/opfs_backend.cpp
 +++ b/system/lib/wasmfs/backends/opfs_backend.cpp
 @@ -9,6 +9,8 @@
@@ -19,7 +40,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
  #include <vector>
  
  #include "backend.h"
-@@ -112,6 +114,61 @@
+@@ -112,6 +114,61 @@ struct OpfsTimer {
    }
  };
  
@@ -81,7 +102,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
  class OpenState {
  public:
    enum Kind { None, Access, Blob };
-@@ -424,6 +481,9 @@
+@@ -418,6 +475,9 @@ public:
    // The ID of this directory in the JS library.
    int dirID = 0;
  
@@ -91,7 +112,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
    OPFSDirectory(mode_t mode, backend_t backend, int dirID, Worker& proxy)
      : Directory(mode, backend), proxy(proxy), dirID(dirID) {}
  
-@@ -437,6 +497,10 @@
+@@ -431,6 +491,10 @@ public:
  
  private:
    std::shared_ptr<File> getChild(const std::string& name) override {
@@ -102,7 +123,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
      OpfsTimer _t(OPFS_OP_DIR);
      int childType = 0, childID = 0;
      proxy([&](auto ctx) {
-@@ -445,6 +509,10 @@
+@@ -439,6 +503,10 @@ private:
      });
      if (childID < 0) {
        // TODO: More fine-grained error reporting.
@@ -113,7 +134,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
        return NULL;
      }
      if (childType == 1) {
-@@ -459,6 +527,7 @@
+@@ -453,6 +521,7 @@ private:
  
    std::shared_ptr<DataFile> insertDataFile(const std::string& name,
                                             mode_t mode) override {
@@ -121,7 +142,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
      OpfsTimer _t(OPFS_OP_DIR);
      int childID = 0;
      proxy([&](auto ctx) {
-@@ -473,6 +542,7 @@
+@@ -467,6 +536,7 @@ private:
  
    std::shared_ptr<Directory> insertDirectory(const std::string& name,
                                               mode_t mode) override {
@@ -129,7 +150,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
      OpfsTimer _t(OPFS_OP_DIR);
      int childID = 0;
      proxy([&](auto ctx) {
-@@ -493,6 +563,7 @@
+@@ -487,6 +557,7 @@ private:
    }
  
    int insertMove(const std::string& name, std::shared_ptr<File> file) override {
@@ -137,7 +158,7 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
      OpfsTimer _t(OPFS_OP_DIR);
      int err = 0;
      if (file->is<DataFile>()) {
-@@ -612,6 +683,26 @@
+@@ -606,6 +677,26 @@ EMSCRIPTEN_KEEPALIVE double wasmfs_opfs_stat_shape(int what) {
    return 0;
  }
  
@@ -164,18 +185,3 @@ Applies after emsdk.8.patch (it moves the OPFS_OP_DIR timer below the cache chec
  backend_t wasmfs_create_opfs_backend() {
    // ProxyWorker cannot safely be synchronously spawned from the main browser
    // thread. See comment in thread_utils.h for more details.
---- a/system/include/emscripten/wasmfs.h
-+++ b/system/include/emscripten/wasmfs.h
-@@ -72,6 +72,12 @@
- // thread.
- backend_t wasmfs_create_opfs_backend(void);
- 
-+// The OPFS backend caches the names a directory lookup found missing. Call this
-+// after creating OPFS entries without going through WasmFS (JS using the OPFS
-+// API directly, another tab), or they stay invisible until the next call. Safe
-+// from any thread. (emsdk.8.patch)
-+void wasmfs_opfs_invalidate_negative_cache(void);
-+
- // Creates a generic JSIMPL backend in the new file system.
- backend_t wasmfs_create_jsimpl_backend(void);
- 

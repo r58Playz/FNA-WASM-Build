@@ -11,14 +11,13 @@ import zipfile
 
 
 VARIANTS = (
-    ("ST-dotnet.zip", "st", False, False),
-    ("dotnet.zip", "mt", True, False),
-    ("dotnet-jit.zip", "jit-mt", True, False),
-    ("dotnet-jspi-jit.zip", "jit-mt", True, True),
+    ("ST-dotnet.zip", "st", False),
+    ("dotnet.zip", "mt", True),
+    ("dotnet-jit.zip", "jit-mt", True),
 )
 
 
-def assemble(source, compiler, destination, threads, jspi):
+def assemble(source, compiler, destination, threads):
     with zipfile.ZipFile(source) as archive:
         runtime = json.loads(archive.read("runtime-build.json"))
     cross = json.loads((compiler / "build.json").read_text())
@@ -28,7 +27,7 @@ def assemble(source, compiler, destination, threads, jspi):
                           ("host_rid", "osx-arm64")):
         if cross[key] != expected:
             raise ValueError(f"{source.name}: compiler {key}={cross[key]!r}, expected {expected!r}")
-    if runtime["wasm_enable_threads"] != threads or runtime["wasm_enable_jspi"] != jspi:
+    if runtime["wasm_enable_threads"] != threads:
         raise ValueError(f"Wrong runtime configuration: {source}")
     executable = compiler / "mono-aot-cross"
     if not executable.is_file() or executable.stat().st_mode & 0o111 == 0:
@@ -36,7 +35,7 @@ def assemble(source, compiler, destination, threads, jspi):
     with executable.open("rb") as stream:
         if stream.read(8) != struct.pack("<II", 0xFEEDFACF, 0x0100000C):
             raise ValueError(f"Expected ARM64 Mach-O compiler: {executable}")
-    # Staging each variant separately also prevents mixing the JIT/JSPI payloads.
+    # Staging each variant separately also prevents mixing the JIT/non-JIT payloads.
     with tempfile.TemporaryDirectory(prefix="fna-macos-dotnet-") as temporary:
         stage = Path(temporary)
         subprocess.run(["unzip", "-q", str(source.resolve()), "-d", str(stage)], check=True)
@@ -58,12 +57,12 @@ def main():
     parser.add_argument("compilers", type=Path, help="extracted macOS bundles: st/cross, mt/cross, jit-mt/cross")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    for name, compiler, threads, jspi in VARIANTS:
+    for name, compiler, threads in VARIANTS:
         matches = list(args.artifacts.rglob(name))
         if len(matches) != 1:
             raise ValueError(f"Expected one {name} under {args.artifacts}, found {matches}")
         destination = args.output / name.replace(".zip", "-osx-arm64.zip")
-        assemble(matches[0], args.compilers / compiler / "cross", destination, threads, jspi)
+        assemble(matches[0], args.compilers / compiler / "cross", destination, threads)
 
 
 if __name__ == "__main__":

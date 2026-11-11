@@ -7,9 +7,13 @@ counted chunk into pieces that dlfree uncounts one by one, so it needs nothing. 
 (MSPACES is 0 in emscripten). Checked: equals mallinfo().uordblks exactly through 400k random calls of every instrumented entry point.
 Rebuild: embuilder build --force libdlmalloc*.
 
---- a/system/lib/dlmalloc.c	2026-10-17 19:39:37.481741639 -0700
-+++ b/system/lib/dlmalloc.c	2026-10-17 19:39:37.483376221 -0700
-@@ -44,6 +44,19 @@
+Ported to emscripten 6.0.2 (fna-6.0.2 cc2c139); paths are emscripten 6's src/lib/lib*.js.
+
+diff --git a/system/lib/dlmalloc.c b/system/lib/dlmalloc.c
+index 684212f..d6e69a1 100644
+--- a/system/lib/dlmalloc.c
++++ b/system/lib/dlmalloc.c
+@@ -42,6 +42,19 @@ _Static_assert(MALLOC_ALIGNMENT == 8, "max_align_t must be 8");
  
  #endif // __EMSCRIPTEN__
  
@@ -29,7 +33,7 @@ Rebuild: embuilder build --force libdlmalloc*.
  
  #define __THROW
  #define __attribute_malloc__
-@@ -4759,6 +4772,8 @@
+@@ -4757,6 +4770,8 @@ void* dlmalloc(size_t bytes) {
          
      postaction:
          POSTACTION(gm);
@@ -38,7 +42,7 @@ Rebuild: embuilder build --force libdlmalloc*.
  #if __EMSCRIPTEN__
          /* XXX Emscripten Tracing API. */
          emscripten_trace_record_allocation(mem, bytes);
-@@ -4784,6 +4799,7 @@
+@@ -4782,6 +4797,7 @@ void dlfree(void* mem) {
          emscripten_trace_record_free(mem);
  #endif
          mchunkptr p  = mem2chunk(mem);
@@ -46,7 +50,7 @@ Rebuild: embuilder build --force libdlmalloc*.
  #if FOOTERS
          mstate fm = get_mstate_for(p);
          if (!ok_magic(fm)) {
-@@ -5003,6 +5019,7 @@
+@@ -5001,6 +5017,7 @@ static void* internal_memalign(mstate m, size_t alignment, size_t bytes) {
          mem = internal_malloc(m, req);
          if (mem != 0) {
              mchunkptr p = mem2chunk(mem);
@@ -54,7 +58,7 @@ Rebuild: embuilder build --force libdlmalloc*.
              if (PREACTION(m))
                  return 0;
              if ((((size_t)(mem)) & (alignment - 1)) != 0) { /* misaligned */
-@@ -5051,6 +5068,7 @@
+@@ -5049,6 +5066,7 @@ static void* internal_memalign(mstate m, size_t alignment, size_t bytes) {
              assert (chunksize(p) >= nb);
              assert(((size_t)mem & (alignment - 1)) == 0);
              check_inuse_chunk(m, p);
@@ -62,7 +66,7 @@ Rebuild: embuilder build --force libdlmalloc*.
              POSTACTION(m);
          }
      }
-@@ -5216,8 +5234,11 @@
+@@ -5214,8 +5232,11 @@ static size_t internal_bulk_free(mstate m, void* array[], size_t nelem) {
                          set_inuse(m, p, newsize);
                          *b = chunk2mem(p);
                      }
@@ -75,7 +79,7 @@ Rebuild: embuilder build --force libdlmalloc*.
                  }
                  else {
                      CORRUPTION_ERROR_ACTION(m);
-@@ -5303,11 +5324,14 @@
+@@ -5301,11 +5322,14 @@ void* dlrealloc(void* oldmem, size_t bytes) {
              return 0;
          }
  #endif /* FOOTERS */
@@ -90,7 +94,7 @@ Rebuild: embuilder build --force libdlmalloc*.
                  mem = chunk2mem(newp);
  #if __EMSCRIPTEN__
                  /* XXX Emscripten Tracing API. */
-@@ -5345,11 +5369,14 @@
+@@ -5343,11 +5367,14 @@ void* dlrealloc_in_place(void* oldmem, size_t bytes) {
                  return 0;
              }
  #endif /* FOOTERS */

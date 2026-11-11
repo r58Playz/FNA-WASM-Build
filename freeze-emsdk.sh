@@ -19,25 +19,60 @@ fi
 
 RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 
+# .NET 11 provisions the emsdk (`build.sh -os browser -s provision.emsdk`) into a tool cache,
+# $(WasmToolCacheDir)emscripten/<version>-<host rid>/ (eng/wasm/WasmToolCache.props). Resolve it with the runtime's own
+# eng/wasm/wasm-tool-cache.sh, so the cache root (DOTNET_WASM_TOOL_CACHE_DIR, else the main checkout's
+# .dotnet/wasm-tools), worktree anchoring and host RID (linux-x64, osx-arm64, ...) are exactly the build's; it only
+# reports an entry whose .complete sentinel exists. .NET 10 kept the emsdk in src/mono/browser/emsdk.
+wasm_tool_cache_emsdk() {
+  local root="$1"
+  [[ -f "$root/eng/wasm/wasm-tool-cache.sh" ]] || return 1
+  (
+    . "$root/eng/wasm/wasm-tool-cache.sh"
+    wasm_tool_cache_dir emscripten "$root/src/mono/browser/emscripten-version.txt" "$root"
+  )
+}
+
 EMSDK_SRC=""
 if [[ -d "$RUNTIME_ROOT/src/mono/browser/emsdk" ]]; then
   EMSDK_SRC="$RUNTIME_ROOT/src/mono/browser/emsdk"
+elif CACHE_EMSDK="$(wasm_tool_cache_emsdk "$RUNTIME_ROOT")" && [[ -d "$CACHE_EMSDK/emscripten" ]]; then
+  EMSDK_SRC="$CACHE_EMSDK"
 elif [[ -d "$RUNTIME_ROOT/emscripten" && -d "$RUNTIME_ROOT/bin" ]]; then
   EMSDK_SRC="$RUNTIME_ROOT"
 else
   echo "error: unable to locate emsdk root from input: $RUNTIME_ROOT" >&2
-  echo "expected either <runtime-root>/src/mono/browser/emsdk or a direct emsdk root" >&2
+  echo "expected <runtime-root>/src/mono/browser/emsdk (.NET 10), the runtime's wasm tool cache (.NET 11)," >&2
+  echo "or a direct emsdk root" >&2
   exit 1
 fi
 
 EMSDK_SRC="$(cd "$EMSDK_SRC" && pwd)"
 
+# Patch and rebuild a COPY. The source is the toolchain the runtime itself builds with (and, in .NET 11, a
+# cache shared by every worktree of the checkout); patching it in place would make the next runtime build use a
+# patched emscripten without anyone deciding to.
+# On disk, beside the output (or FREEZE_TMPDIR): the copy holds a whole LLVM toolchain, and /tmp is often a RAM-backed
+# tmpfs that other work (perf maps, browser profiles) also fills.
+STAGE_PARENT="${FREEZE_TMPDIR:-$(dirname "$OUTPUT_ZIP")}"
+mkdir -p "$STAGE_PARENT"
+# Absolute: the staged paths become EM_CONFIG / EM_CACHE, which embuilder rejects when relative (e.g. the output is
+# ./emsdk-frozen.zip, so the parent is ".").
+STAGE_PARENT="$(cd "$STAGE_PARENT" && pwd)"
+STAGE_ROOT="$(mktemp -d -p "$STAGE_PARENT" freeze-emsdk-XXXXXX)"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+echo "Copying $EMSDK_SRC to a staging copy"
+cp -a "$EMSDK_SRC/." "$STAGE_ROOT/emsdk/"
+EMSDK_SRC="$STAGE_ROOT/emsdk"
+
 # Function to apply a patch file to the emsdk emscripten directory
 apply_patch() {
   local patch_file="$1"
   
+  # A missing patch is an error, not a skip: a renamed file would otherwise drop out of the toolchain silently.
   if [[ ! -f "$patch_file" ]]; then
-    return 0
+    echo "error: patch not found: $patch_file" >&2
+    exit 1
   fi
   
   if ! patch -p1 --forward --directory "$EMSDK_SRC/emscripten" < "$patch_file"; then
@@ -51,10 +86,7 @@ apply_patch() {
 
 for path in \
   "$EMSDK_SRC/emsdk_env.sh" \
-  "$EMSDK_SRC/emscripten/.emscripten" \
-  "$EMSDK_SRC/emscripten/.emsdk_version" \
-  "$EMSDK_SRC/node/.emsdk_version" \
-  "$EMSDK_SRC/.emsdk_version"
+  "$EMSDK_SRC/emscripten/.emscripten"
 do
   if [[ ! -e "$path" ]]; then
     echo "error: required file missing for frozen emsdk: $path" >&2
@@ -70,36 +102,51 @@ if [[ ! -f "$EMSDK_SRC/emscripten/system/lib/wasmfs/thread_utils.h" ]]; then
   echo "error: missing wasmfs thread_utils.h in emsdk source" >&2
   exit 1
 fi
-if [[ ! -f "$EMSDK_SRC/emscripten/src/library_wasmfs_opfs.js" ]]; then
-  echo "error: missing wasmfs OPFS library_wasmfs_opfs.js in emsdk source" >&2
+if [[ ! -f "$EMSDK_SRC/emscripten/src/lib/libwasmfs_opfs.js" ]]; then
+  echo "error: missing wasmfs OPFS src/lib/libwasmfs_opfs.js in emsdk source (emscripten 6 layout)" >&2
   exit 1
 fi
 
-apply_patch "${SCRIPT_DIR}/emsdk.patch"
-apply_patch "${SCRIPT_DIR}/emsdk.2.patch"
+# emscripten 6.0.2. Dropped as upstream in 6.0.2: emsdk.patch (async html5 callbacks), .2 (ProxyWorker ctor
+# race, #24370), .5 (proxy_finish signal before unlock, #26582), .7 (system queue under its own mutex, the R479
+# deadlock, 21a3a81daf). .3 is now a backport of upstream #27937 (readwrite-unsafe OPFS handles, in 7.0.0).
 apply_patch "${SCRIPT_DIR}/emsdk.3.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.4.patch"
-apply_patch "${SCRIPT_DIR}/emsdk.5.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.6.patch"
-apply_patch "${SCRIPT_DIR}/emsdk.7.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.8.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.9.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.10.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.11.patch"
+apply_patch "${SCRIPT_DIR}/emsdk.12.patch"
 
+# Rebuild after patching so the archives contain patched code as well as patched sources. The list is every archive
+# and crt object the provisioned cache already holds, read BEFORE embuilder runs: the cache's sanity.txt names the
+# toolchain path of the machine that built it, so embuilder starts by clearing the whole cache (R502), and anything not
+# on the list would then be missing from the frozen cache. Reading it from the cache also keeps the names right across
+# emscripten versions (6.x names variants -wasmexcept / -legacyexcept / -wasmsjlj; 3.1.56's list did not carry over).
 EMSDK_CACHE="$EMSDK_SRC/emscripten/cache"
 EMSDK_SYSROOT_LIB="$EMSDK_CACHE/sysroot/lib/wasm32-emscripten"
-
-# The provisioned cache may already contain these libraries. Rebuild after
-# patching so the archive contains patched code as well as patched sources.
-echo "Preparing emsdk cache artifacts via embuilder (cache=$EMSDK_CACHE)"
+# macOS ships Bash 3.2, which does not have mapfile.
+EMBUILDER_LIBS=()
+while IFS= read -r lib; do
+  EMBUILDER_LIBS+=("$lib")
+done < <(cd "$EMSDK_SYSROOT_LIB" && ls -1 *.a *.o 2>/dev/null | sed -E 's/\.(a|o)$//' | sort -u)
+if [[ ${#EMBUILDER_LIBS[@]} -lt 50 ]]; then
+  echo "error: the provisioned cache holds only ${#EMBUILDER_LIBS[@]} archives in $EMSDK_SYSROOT_LIB" >&2
+  exit 1
+fi
+echo "Rebuilding ${#EMBUILDER_LIBS[@]} cache entries via embuilder (cache=$EMSDK_CACHE)"
+# "sysroot" first reinstalls the headers, so the patched ones (emsdk.9's wasmfs.h, emsdk.12's new <sys/eventfd.h>,
+# which libc's eventfd.c includes) reach the cache even when embuilder does not start by clearing it.
+# EM_FROZEN_CACHE must be EMPTY to unfreeze: .NET's .emscripten computes FROZEN_CACHE = bool(os.getenv('EM_FROZEN_CACHE',
+# 'True')), so "0" is a non-empty string and reads as frozen.
 EM_CONFIG="$EMSDK_SRC/emscripten/.emscripten" \
   EM_CACHE="$EMSDK_CACHE" \
-  EM_FROZEN_CACHE=0 \
-  "$EMSDK_SRC/emscripten/embuilder" --force build libcompiler_rt libcompiler_rt-ww libcompiler_rt-mt libcompiler_rt-wasm-sjlj libcompiler_rt-wasm-sjlj-ww libcompiler_rt-wasm-sjlj-mt libc libc-debug libc-asan libc-asan-debug libc-ww libc-ww-debug libc-ww-asan libc-ww-asan-debug libc-mt libc-mt-debug libc-mt-asan libc-mt-asan-debug libc_optz libc_optz-debug libc_optz-asan libc_optz-asan-debug libc_optz-ww libc_optz-ww-debug libc_optz-ww-asan libc_optz-ww-asan-debug libc_optz-mt libc_optz-mt-debug libc_optz-mt-asan libc_optz-mt-asan-debug libprintf_long_double libprintf_long_double-debug libprintf_long_double-asan libprintf_long_double-asan-debug libprintf_long_double-ww libprintf_long_double-ww-debug libprintf_long_double-ww-asan libprintf_long_double-ww-asan-debug libprintf_long_double-mt libprintf_long_double-mt-debug libprintf_long_double-mt-asan libprintf_long_double-mt-asan-debug libwasm_workers_stub libwasm_workers_stub-debug libwasm_workers libwasm_workers-debug libsockets libsockets-ww libsockets-mt libsockets_proxy libsockets_proxy-ww libsockets_proxy-mt libc++abi-noexcept libc++abi-ww-noexcept libc++abi-mt-noexcept libc++abi-debug-noexcept libc++abi-debug-ww-noexcept libc++abi-debug-mt-noexcept libc++abi libc++abi-ww libc++abi-mt libc++abi-debug libc++abi-debug-ww libc++abi-debug-mt libc++abi-except libc++abi-ww-except libc++abi-mt-except libc++abi-debug-except libc++abi-debug-ww-except libc++abi-debug-mt-except libc++-noexcept libc++-ww-noexcept libc++-mt-noexcept libc++ libc++-ww libc++-mt libc++-except libc++-ww-except libc++-mt-except libunwind-noexcept libunwind-ww-noexcept libunwind-mt-noexcept libunwind libunwind-ww libunwind-mt libunwind-except libunwind-ww-except libunwind-mt-except libdlmalloc libdlmalloc-tracing libdlmalloc-debug libdlmalloc-debug-tracing libdlmalloc-ww libdlmalloc-ww-tracing libdlmalloc-ww-debug libdlmalloc-ww-debug-tracing libdlmalloc-mt libdlmalloc-mt-tracing libdlmalloc-mt-debug libdlmalloc-mt-debug-tracing libemmalloc libemmalloc-tracing libemmalloc-debug libemmalloc-debug-tracing libemmalloc-ww libemmalloc-ww-tracing libemmalloc-ww-debug libemmalloc-ww-debug-tracing libemmalloc-mt libemmalloc-mt-tracing libemmalloc-mt-debug libemmalloc-mt-debug-tracing libemmalloc-memvalidate-verbose libemmalloc-memvalidate-verbose-tracing libemmalloc-memvalidate-verbose-ww libemmalloc-memvalidate-verbose-ww-tracing libemmalloc-memvalidate-verbose-mt libemmalloc-memvalidate-verbose-mt-tracing libemmalloc-memvalidate libemmalloc-memvalidate-tracing libemmalloc-memvalidate-ww libemmalloc-memvalidate-ww-tracing libemmalloc-memvalidate-mt libemmalloc-memvalidate-mt-tracing libemmalloc-verbose libemmalloc-verbose-tracing libemmalloc-verbose-ww libemmalloc-verbose-ww-tracing libemmalloc-verbose-mt libemmalloc-verbose-mt-tracing libmimalloc libmimalloc-ww libmimalloc-mt libGL libGL-getprocaddr libGL-full_es3 libGL-full_es3-getprocaddr libGL-ofb libGL-ofb-getprocaddr libGL-ofb-full_es3 libGL-ofb-full_es3-getprocaddr libGL-webgl2 libGL-webgl2-getprocaddr libGL-webgl2-full_es3 libGL-webgl2-full_es3-getprocaddr libGL-webgl2-ofb libGL-webgl2-ofb-getprocaddr libGL-webgl2-ofb-full_es3 libGL-webgl2-ofb-full_es3-getprocaddr libGL-emu libGL-emu-getprocaddr libGL-emu-full_es3 libGL-emu-full_es3-getprocaddr libGL-emu-ofb libGL-emu-ofb-getprocaddr libGL-emu-ofb-full_es3 libGL-emu-ofb-full_es3-getprocaddr libGL-emu-webgl2 libGL-emu-webgl2-getprocaddr libGL-emu-webgl2-full_es3 libGL-emu-webgl2-full_es3-getprocaddr libGL-emu-webgl2-ofb libGL-emu-webgl2-ofb-getprocaddr libGL-emu-webgl2-ofb-full_es3 libGL-emu-webgl2-ofb-full_es3-getprocaddr libGL-ww libGL-ww-getprocaddr libGL-ww-full_es3 libGL-ww-full_es3-getprocaddr libGL-ww-ofb libGL-ww-ofb-getprocaddr libGL-ww-ofb-full_es3 libGL-ww-ofb-full_es3-getprocaddr libGL-ww-webgl2 libGL-ww-webgl2-getprocaddr libGL-ww-webgl2-full_es3 libGL-ww-webgl2-full_es3-getprocaddr libGL-ww-webgl2-ofb libGL-ww-webgl2-ofb-getprocaddr libGL-ww-webgl2-ofb-full_es3 libGL-ww-webgl2-ofb-full_es3-getprocaddr libGL-ww-emu libGL-ww-emu-getprocaddr libGL-ww-emu-full_es3 libGL-ww-emu-full_es3-getprocaddr libGL-ww-emu-ofb libGL-ww-emu-ofb-getprocaddr libGL-ww-emu-ofb-full_es3 libGL-ww-emu-ofb-full_es3-getprocaddr libGL-ww-emu-webgl2 libGL-ww-emu-webgl2-getprocaddr libGL-ww-emu-webgl2-full_es3 libGL-ww-emu-webgl2-full_es3-getprocaddr libGL-ww-emu-webgl2-ofb libGL-ww-emu-webgl2-ofb-getprocaddr libGL-ww-emu-webgl2-ofb-full_es3 libGL-ww-emu-webgl2-ofb-full_es3-getprocaddr libGL-mt libGL-mt-getprocaddr libGL-mt-full_es3 libGL-mt-full_es3-getprocaddr libGL-mt-ofb libGL-mt-ofb-getprocaddr libGL-mt-ofb-full_es3 libGL-mt-ofb-full_es3-getprocaddr libGL-mt-webgl2 libGL-mt-webgl2-getprocaddr libGL-mt-webgl2-full_es3 libGL-mt-webgl2-full_es3-getprocaddr libGL-mt-webgl2-ofb libGL-mt-webgl2-ofb-getprocaddr libGL-mt-webgl2-ofb-full_es3 libGL-mt-webgl2-ofb-full_es3-getprocaddr libGL-mt-emu libGL-mt-emu-getprocaddr libGL-mt-emu-full_es3 libGL-mt-emu-full_es3-getprocaddr libGL-mt-emu-ofb libGL-mt-emu-ofb-getprocaddr libGL-mt-emu-ofb-full_es3 libGL-mt-emu-ofb-full_es3-getprocaddr libGL-mt-emu-webgl2 libGL-mt-emu-webgl2-getprocaddr libGL-mt-emu-webgl2-full_es3 libGL-mt-emu-webgl2-full_es3-getprocaddr libGL-mt-emu-webgl2-ofb libGL-mt-emu-webgl2-ofb-getprocaddr libGL-mt-emu-webgl2-ofb-full_es3 libGL-mt-emu-webgl2-ofb-full_es3-getprocaddr libwebgpu libwebgpu-ww libwebgpu-mt libwebgpu_cpp libwebgpu_cpp-ww libwebgpu_cpp-mt libfetch libfetch-ww libfetch-mt libwasmfs libwasmfs-icase libwasmfs-debug libwasmfs-debug-icase libwasmfs-asan libwasmfs-asan-icase libwasmfs-asan-debug libwasmfs-asan-debug-icase libwasmfs-ww libwasmfs-ww-icase libwasmfs-ww-debug libwasmfs-ww-debug-icase libwasmfs-ww-asan libwasmfs-ww-asan-icase libwasmfs-ww-asan-debug libwasmfs-ww-asan-debug-icase libwasmfs-mt libwasmfs-mt-icase libwasmfs-mt-debug libwasmfs-mt-debug-icase libwasmfs-mt-asan libwasmfs-mt-asan-icase libwasmfs-mt-asan-debug libwasmfs-mt-asan-debug-icase libubsan_minimal_rt libubsan_minimal_rt-ww libubsan_minimal_rt-mt libsanitizer_common_rt libsanitizer_common_rt-ww libsanitizer_common_rt-mt libubsan_rt libubsan_rt-ww libubsan_rt-mt liblsan_common_rt liblsan_common_rt-ww liblsan_common_rt-mt liblsan_rt liblsan_rt-ww liblsan_rt-mt libasan_rt libasan_rt-ww libasan_rt-mt libstubs libstubs-debug libbulkmemory libbulkmemory-asan crt1 crt1_reactor crt1_proxy_main crtbegin libstandalonewasm libstandalonewasm-nocatch libstandalonewasm-pure libstandalonewasm-nocatch-pure libstandalonewasm-memgrow libstandalonewasm-nocatch-memgrow libstandalonewasm-memgrow-pure libstandalonewasm-nocatch-memgrow-pure libnoexit libal libembind libembind-rtti libwasmfs_no_fs libwasmfs_noderawfs libhtml5 libasan_js libjsmath
+  EM_FROZEN_CACHE= \
+  "$EMSDK_SRC/emscripten/embuilder" --force build sysroot "${EMBUILDER_LIBS[@]}"
 
 echo "Verifying embuilder populated expected libraries in $EMSDK_SYSROOT_LIB"
-for required in libc-mt.a libc.a libcompiler_rt.a libcompiler_rt-mt.a libsockets-mt.a libwasmfs-mt.a; do
+for required in libc-mt.a libc.a libclang_rt.builtins.a libclang_rt.builtins-mt.a libsockets-mt.a libwasmfs-mt.a libdlmalloc-mt.a; do
   if [[ ! -f "$EMSDK_SYSROOT_LIB/$required" ]]; then
     echo "error: embuilder did not produce $required in $EMSDK_SYSROOT_LIB" >&2
     echo "(cache directory contents:)" >&2

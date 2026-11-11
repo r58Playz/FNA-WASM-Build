@@ -1,0 +1,4625 @@
+WasmFS sockets, epoll, eventfd, socketpair and blocking poll, for OpenJDK's libnet/libnio (Socket, SocketChannel,
+Selector, Netty NIO) running under IKVM in ikvmcraft. WasmFS returned ENOSYS for every socket syscall and for epoll,
+its poll() never blocked, an empty pipe read as EOF while a writer was alive, dup2() over an open descriptor never
+closed the file it replaced, and libc had no eventfd. Now:
+- Pipes, sockets, eventfds and epoll instances are stream files (system/lib/wasmfs/stream_file.h; the lock order is
+  documented there). read/write/send/recv/poll/epoll_wait/connect run without the File and OpenFileState locks and
+  block on a futex until the file notifies, a timeout passes, close() of the last descriptor (EBADF), or a signal:
+  pthread_kill() now also wakes a target blocked in emscripten_futex_wait (pthread_kill.c), the blocked syscall runs
+  the thread's system queue, and returns EINTR if a handler ran (raise.c counts them; read/write/connect only count
+  handlers without SA_RESTART). O_NONBLOCK (fcntl, FIONBIO, pipe2, SOCK_NONBLOCK, EFD_NONBLOCK) gives EAGAIN. The
+  main browser thread never blocks: there every descriptor acts non-blocking and timeouts are zero.
+- poll()/select() block; an empty pipe with a live writer is EAGAIN or blocks; dup2/dup3 closes what it replaces.
+- epoll with emscripten #27207's semantics (LT/ET/ONESHOT/EXCLUSIVE/RDHUP, nesting and ELOOP, dup sharing,
+  round-robin past maxevents, eviction when the watched description closes; zero timeouts go through
+  __syscall_epoll_pwait_nonblocking as in #27207). eventfd: musl's eventfd.c, <sys/eventfd.h>, SYS_eventfd2.
+- socketpair(AF_UNIX, SOCK_STREAM). AF_INET/AF_INET6 TCP client sockets over a transport the embedder supplies
+  (src/lib/libwasmfs_sockets.js documents it: globalThis.wasmfsSocketTransport = {connect, send, shutdown?, close,
+  pause?, resume?}, installed with --pre-js so it exists in every worker; none installed: ENETUNREACH), owned by one
+  dedicated network pthread that syscalls post to and never wait on. Sends are bounded by SO_SNDBUF until the
+  transport reports them drained. listen/accept are EOPNOTSUPP, UDP sends ENETUNREACH, there is no SIGPIPE.
+- getaddrinfo/getnameinfo/gethostbyname resolve in C (resolver.cpp) to fake 240.67.0.0/16 addresses that connect()
+  maps back to the hostname for the transport, replacing libcore.js's JS versions (which proxy to the main thread).
+Applies after emsdk.11.patch. Rebuild: embuilder build --force sysroot (new header) libc* libwasmfs*
+libstandalonewasm*. Tests (test/wasmfs/wasmfs_*.c, the loopback transport wasmfs_sockets_transport.js, and
+test_other.py's test_wasmfs_*) are on the source branch only: .NET's emsdk has no test/.
+
+From emscripten-6.0.2 branch wasmfs-sockets (5b11e23 5adfe1d 36cd282 e17bc8b ) on fna-dotnet (.NET's emscripten 6.0.3 6ea9c28c38cd + emsdk.3-11).
+
+diff --git a/src/lib/libsigs.js b/src/lib/libsigs.js
+index 83be1a2..3c2547e 100644
+--- a/src/lib/libsigs.js
++++ b/src/lib/libsigs.js
+@@ -240,6 +240,8 @@ sigs = {
+   __syscall_epoll_create1__sig: 'ii',
+   __syscall_epoll_ctl__sig: 'iiiip',
+   __syscall_epoll_pwait__sig: 'iipiipp',
++  __syscall_epoll_pwait_nonblocking__sig: 'iipi',
++  __syscall_eventfd2__sig: 'iii',
+   __syscall_faccessat__sig: 'iipii',
+   __syscall_fallocate__sig: 'iiijj',
+   __syscall_fchdir__sig: 'ii',
+@@ -453,6 +455,12 @@ sigs = {
+   _wasmfs_opfs_set_size_access__sig: 'vpijp',
+   _wasmfs_opfs_set_size_file__sig: 'vpijp',
+   _wasmfs_opfs_write_access__sig: 'iipij',
++  _wasmfs_socket_close__sig: 'vii',
++  _wasmfs_socket_connect__sig: 'vipii',
++  _wasmfs_socket_resume__sig: 'vi',
++  _wasmfs_socket_send__sig: 'vipp',
++  _wasmfs_socket_shutdown__sig: 'vi',
++  _wasmfs_socket_thread_init__sig: 'vp',
+   _wasmfs_stdin_get_char__sig: 'i',
+   _wasmfs_thread_utils_heartbeat__sig: 'vp',
+   alBuffer3f__sig: 'viifff',
+diff --git a/src/lib/libsyscall.js b/src/lib/libsyscall.js
+index e2add29..f8a2338 100755
+--- a/src/lib/libsyscall.js
++++ b/src/lib/libsyscall.js
+@@ -709,6 +709,13 @@ var SyscallsLibrary = {
+   __syscall_epoll_ctl: (epfd, op, fd, ev) => -{{{ cDefs.ENOSYS }}},
+   __syscall_epoll_pwait__nothrow: true,
+   __syscall_epoll_pwait: (epfd, ev, maxevents, timeout, sigmask, sigsetsize) => -{{{ cDefs.ENOSYS }}},
++  // libc routes zero-timeout epoll_wait() here (musl's epoll.c), as poll()
++  // does to __syscall_poll_nonblocking. WasmFS implements both.
++  __syscall_epoll_pwait_nonblocking__nothrow: true,
++  __syscall_epoll_pwait_nonblocking: (epfd, ev, maxevents) => -{{{ cDefs.ENOSYS }}},
++  // eventfd is implemented in WasmFS only.
++  __syscall_eventfd2__nothrow: true,
++  __syscall_eventfd2: (initval, flags) => -{{{ cDefs.ENOSYS }}},
+   __syscall_getcwd__deps: ['$lengthBytesUTF8', '$stringToUTF8'],
+   __syscall_getcwd: (buf, size) => {
+     if (size === 0) return -{{{ cDefs.EINVAL }}};
+diff --git a/src/lib/libwasmfs_sockets.js b/src/lib/libwasmfs_sockets.js
+new file mode 100644
+index 0000000..64da31b
+--- /dev/null
++++ b/src/lib/libwasmfs_sockets.js
+@@ -0,0 +1,173 @@
++/**
++ * @license
++ * Copyright 2026 The Emscripten Authors
++ * SPDX-License-Identifier: MIT
++ */
++
++// The transport behind WasmFS's AF_INET/AF_INET6 sockets
++// (system/lib/wasmfs/inet_socket.cpp).
++//
++// A browser cannot open TCP connections, so the embedder supplies the
++// transport, an object with these methods:
++//
++//   connect(id, host, port, family, events)
++//       Open a connection for socket `id`. `family` is 4 or 6 when `host` is
++//       an address literal, and 0 when it is a host name: getaddrinfo() gives
++//       names fake addresses, and connect() hands the name back. Report the
++//       outcome with events.open(id) or events.close(id, error).
++//   send(id, bytes)
++//       Send `bytes`, a Uint8Array the transport now owns. Call
++//       events.drained(id, n) once n bytes passed to send() no longer occupy
++//       memory on the transport's side (from within send() is fine); until
++//       then they count against the socket's send buffer (SO_SNDBUF), and a
++//       full buffer blocks the writer.
++//   shutdown(id)                       optional
++//       Half-close (TCP FIN) after the bytes already sent.
++//   close(id, abort)
++//       Release the connection: an orderly close, or a reset if `abort`
++//       (SO_LINGER with a zero timeout). May follow events.close(id).
++//   pause(id), resume(id)              optional
++//       Receive flow control: the socket holds SO_RCVBUF unread bytes / a
++//       reader has drained it to half that. Without them the receive buffer
++//       grows without bound.
++//
++// and reports through `events`, the object passed to connect():
++//
++//   events.open(id)           connected
++//   events.data(id, bytes)    bytes received (a Uint8Array or ArrayBuffer)
++//   events.end(id)            the peer closed its side (FIN): EOF after the data
++//   events.drained(id, n)     n sent bytes have left the transport
++//   events.close(id, error)   the connection is gone. `error` is undefined or 0
++//                             for an orderly close, else one of 'ECONNREFUSED',
++//                             'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH',
++//                             'ENETUNREACH', 'ECONNABORTED', 'EPIPE' (anything
++//                             else reads as ECONNRESET). While connecting it
++//                             fails the connect (ECONNREFUSED if no error).
++//
++// All of it happens on one dedicated network pthread, never the main browser
++// thread, and events must be delivered there: whatever does the transport's
++// I/O (a WebSocket, say) belongs to that worker. The transport is looked up on
++// each connect, in that worker, as Module['wasmfsSocketTransport'] or
++// globalThis.wasmfsSocketTransport, so install it with --pre-js (pre-js code
++// runs in every worker) or a --js-library __postset. With none installed,
++// connect() fails with ENETUNREACH. Without pthreads the transport runs on the
++// main thread, and only non-blocking sockets are useful.
++
++addToLibrary({
++  $wasmfsSocketGetTransport: () => Module['wasmfsSocketTransport'] ?? globalThis['wasmfsSocketTransport'],
++
++  $wasmfsSocketErrno: (error) => {
++    if (!error) return 0;
++    switch (error) {
++      case 'ECONNREFUSED': return {{{ cDefs.ECONNREFUSED }}};
++      case 'ECONNRESET': return {{{ cDefs.ECONNRESET }}};
++      case 'ETIMEDOUT': return {{{ cDefs.ETIMEDOUT }}};
++      case 'EHOSTUNREACH': return {{{ cDefs.EHOSTUNREACH }}};
++      case 'ENETUNREACH': return {{{ cDefs.ENETUNREACH }}};
++      case 'ECONNABORTED': return {{{ cDefs.ECONNABORTED }}};
++      case 'EPIPE': return {{{ cDefs.EPIPE }}};
++    }
++    return {{{ cDefs.ECONNRESET }}};
++  },
++
++  // Received bytes are staged in wasm memory, 64 KiB at a time.
++  $wasmfsSocketScratch: 0,
++
++  // The `events` object handed to the transport. Its keys are quoted: they
++  // are an interface to code closure does not see.
++  $wasmfsSocketEvents__deps: ['$wasmfsSocketErrno', '$wasmfsSocketGetTransport', '$wasmfsSocketScratch',
++                              'malloc', 'wasmfs_socket_on_open', 'wasmfs_socket_on_data',
++                              'wasmfs_socket_on_end', 'wasmfs_socket_on_drained',
++                              'wasmfs_socket_on_close'],
++  $wasmfsSocketEvents: () => ({
++    'open': (id) => _wasmfs_socket_on_open(id),
++    'data': (id, bytes) => {
++      if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
++      if (!wasmfsSocketScratch) wasmfsSocketScratch = _malloc(65536);
++      var pause = 0;
++      for (var offset = 0; offset < bytes.length; offset += 65536) {
++        var chunk = bytes.subarray(offset, offset + 65536);
++        HEAPU8.set(chunk, wasmfsSocketScratch);
++        pause |= _wasmfs_socket_on_data(id, wasmfsSocketScratch, chunk.length);
++      }
++      if (pause) wasmfsSocketGetTransport()?.['pause']?.(id);
++    },
++    'end': (id) => _wasmfs_socket_on_end(id),
++    'drained': (id, n) => _wasmfs_socket_on_drained(id, n),
++    'close': (id, error) => _wasmfs_socket_on_close(id, wasmfsSocketErrno(error)),
++  }),
++
++  // Runs once on the network thread (pthread builds only). Proxied tasks reach
++  // it through its mailbox: Atomics.waitAsync where the browser has it, else a
++  // postMessage the main thread relays. In the second case also poll the
++  // queue, so a busy main thread cannot stall the network.
++#if PTHREADS
++  _wasmfs_socket_thread_init__deps: ['emscripten_proxy_execute_queue', '$waitAsyncPolyfilled'],
++#endif
++  _wasmfs_socket_thread_init: (queue) => {
++#if PTHREADS
++    if (!waitAsyncPolyfilled) return;
++    var interval = setInterval(() => {
++      if (ABORT) {
++        clearInterval(interval);
++      } else {
++        _emscripten_proxy_execute_queue(queue);
++      }
++    }, 4);
++#endif
++  },
++
++  _wasmfs_socket_connect__deps: ['$wasmfsSocketGetTransport', '$wasmfsSocketEvents', '$UTF8ToString',
++                                 'wasmfs_socket_on_close'],
++  _wasmfs_socket_connect: (id, host, port, family) => {
++    var transport = wasmfsSocketGetTransport();
++    if (!transport) {
++      _wasmfs_socket_on_close(id, {{{ cDefs.ENETUNREACH }}});
++      return;
++    }
++    try {
++      transport['connect'](id, UTF8ToString(host), port, family, wasmfsSocketEvents());
++    } catch (e) {
++      err(`wasmfs: socket transport connect() threw: ${e}`);
++      _wasmfs_socket_on_close(id, {{{ cDefs.ECONNREFUSED }}});
++    }
++  },
++
++  _wasmfs_socket_send__deps: ['$wasmfsSocketGetTransport', 'wasmfs_socket_on_close'],
++  _wasmfs_socket_send: (id, buf, len) => {
++    var bytes = HEAPU8.slice(buf, buf + len);
++    try {
++      wasmfsSocketGetTransport()['send'](id, bytes);
++    } catch (e) {
++      err(`wasmfs: socket transport send() threw: ${e}`);
++      _wasmfs_socket_on_close(id, {{{ cDefs.ECONNRESET }}});
++    }
++  },
++
++  _wasmfs_socket_shutdown__deps: ['$wasmfsSocketGetTransport'],
++  _wasmfs_socket_shutdown: (id) => {
++    try {
++      wasmfsSocketGetTransport()?.['shutdown']?.(id);
++    } catch (e) {
++      err(`wasmfs: socket transport shutdown() threw: ${e}`);
++    }
++  },
++
++  _wasmfs_socket_close__deps: ['$wasmfsSocketGetTransport'],
++  _wasmfs_socket_close: (id, abort) => {
++    try {
++      wasmfsSocketGetTransport()?.['close'](id, !!abort);
++    } catch (e) {
++      err(`wasmfs: socket transport close() threw: ${e}`);
++    }
++  },
++
++  _wasmfs_socket_resume__deps: ['$wasmfsSocketGetTransport'],
++  _wasmfs_socket_resume: (id) => {
++    try {
++      wasmfsSocketGetTransport()?.['resume']?.(id);
++    } catch (e) {
++      err(`wasmfs: socket transport resume() threw: ${e}`);
++    }
++  },
++});
+diff --git a/src/modules.mjs b/src/modules.mjs
+index bc6aa52..ef26769 100644
+--- a/src/modules.mjs
++++ b/src/modules.mjs
+@@ -104,6 +104,7 @@ function calculateLibraries() {
+         'libwasmfs_fetch.js',
+         'libwasmfs_node.js',
+         'libwasmfs_opfs.js',
++        'libwasmfs_sockets.js',
+       );
+     } else {
+       // Core filesystem libraries (always linked against, unless -sFILESYSTEM=0 is specified)
+diff --git a/system/include/emscripten/syscalls.h b/system/include/emscripten/syscalls.h
+index 7864de1..6f348eb 100644
+--- a/system/include/emscripten/syscalls.h
++++ b/system/include/emscripten/syscalls.h
+@@ -124,6 +124,8 @@ int __syscall_shutdown(int sockfd, int how, int unused1, int unused2, int unused
+ int __syscall_epoll_create1(int flags);
+ int __syscall_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev);
+ int __syscall_epoll_pwait(int epfd, struct epoll_event *ev, int maxevents, int timeout, const sigset_t *sigmask, size_t sigsetsize);
++int __syscall_epoll_pwait_nonblocking(int epfd, struct epoll_event *ev, int maxevents);
++int __syscall_eventfd2(unsigned int initval, int flags);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/system/lib/libc/musl/arch/emscripten/bits/syscall.h b/system/lib/libc/musl/arch/emscripten/bits/syscall.h
+index b827d74..d693597 100644
+--- a/system/lib/libc/musl/arch/emscripten/bits/syscall.h
++++ b/system/lib/libc/musl/arch/emscripten/bits/syscall.h
+@@ -89,3 +89,4 @@
+ #define SYS_epoll_create1	__syscall_epoll_create1
+ #define SYS_epoll_ctl		__syscall_epoll_ctl
+ #define SYS_epoll_pwait		__syscall_epoll_pwait
++#define SYS_eventfd2		__syscall_eventfd2
+diff --git a/system/lib/libc/musl/include/sys/eventfd.h b/system/lib/libc/musl/include/sys/eventfd.h
+new file mode 100644
+index 0000000..dc5c88f
+--- /dev/null
++++ b/system/lib/libc/musl/include/sys/eventfd.h
+@@ -0,0 +1,26 @@
++#ifndef _SYS_EVENTFD_H
++#define _SYS_EVENTFD_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <stdint.h>
++#include <fcntl.h>
++
++typedef uint64_t eventfd_t;
++
++#define EFD_SEMAPHORE 1
++#define EFD_CLOEXEC O_CLOEXEC
++#define EFD_NONBLOCK O_NONBLOCK
++
++int eventfd(unsigned int, int);
++int eventfd_read(int, eventfd_t *);
++int eventfd_write(int, eventfd_t);
++
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* sys/eventfd.h */
+diff --git a/system/lib/libc/musl/src/linux/epoll.c b/system/lib/libc/musl/src/linux/epoll.c
+index e56e8f4..6d5f04c 100644
+--- a/system/lib/libc/musl/src/linux/epoll.c
++++ b/system/lib/libc/musl/src/linux/epoll.c
+@@ -25,6 +25,16 @@ int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
+ 
+ int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t *sigs)
+ {
++#ifdef __EMSCRIPTEN__
++	// A zero timeout is an instantaneous probe: route it through a plain
++	// import that never suspends. Under JSPI, __syscall_epoll_pwait is a
++	// suspending import and so may only be called from a stack entered through
++	// a promising export — a requirement a readiness probe must not carry
++	// (e.g. probes from event-loop callbacks). Mirrors poll().
++	if (to == 0) {
++		return __syscall_ret(__syscall_epoll_pwait_nonblocking(fd, ev, cnt));
++	}
++#endif
+ 	int r = __syscall_cp(SYS_epoll_pwait, fd, ev, cnt, to, sigs, _NSIG/8);
+ #ifdef SYS_epoll_wait
+ 	if (r==-ENOSYS && !sigs) r = __syscall_cp(SYS_epoll_wait, fd, ev, cnt, to);
+diff --git a/system/lib/libc/raise.c b/system/lib/libc/raise.c
+index 321d04f..fc058b5 100644
+--- a/system/lib/libc/raise.c
++++ b/system/lib/libc/raise.c
+@@ -16,6 +16,23 @@ extern struct sigaction __sig_actions[_NSIG];
+ 
+ bool __sig_is_blocked(int sig);
+ 
++// How many handlers raise() has run on this thread: all of them, and those
++// installed without SA_RESTART. A blocking WasmFS syscall compares them across
++// its wait to tell a signal (EINTR) from another wake-up; only the second
++// interrupts a syscall Linux restarts under SA_RESTART (read, write, connect).
++static _Thread_local unsigned int handled_all, handled_interrupting;
++
++unsigned int _emscripten_signals_handled(int interrupting_only) {
++  return interrupting_only ? handled_interrupting : handled_all;
++}
++
++static void count_handler(int sig) {
++  handled_all++;
++  if (!(__sig_actions[sig].sa_flags & SA_RESTART)) {
++    handled_interrupting++;
++  }
++}
++
+ // Default handler actions ~auto-generated from https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/signal.h.html.
+ // Note that stop and continue actions are not supported and treated as ignored.
+ 
+@@ -61,6 +78,7 @@ int raise(int sig) {
+   }
+   if (__sig_actions[sig].sa_flags & SA_SIGINFO) {
+     siginfo_t t = {0};
++    count_handler(sig);
+     __sig_actions[sig].sa_sigaction(sig, &t, NULL);
+   } else {
+     sighandler_t handler = __sig_actions[sig].sa_handler;
+@@ -70,6 +88,7 @@ int raise(int sig) {
+         handler(sig);
+       }
+     } else if (handler != SIG_IGN) {
++      count_handler(sig);
+       // Avoid a direct call to the handler, and instead call via JS so we can
+       // avoid strict signature checking.
+       // https://github.com/emscripten-core/posixtestsuite/issues/6
+diff --git a/system/lib/pthread/pthread_kill.c b/system/lib/pthread/pthread_kill.c
+index b1306fe..6e6bfaa 100644
+--- a/system/lib/pthread/pthread_kill.c
++++ b/system/lib/pthread/pthread_kill.c
+@@ -31,6 +31,12 @@ int pthread_kill(pthread_t t, int sig) {
+     raise(sig);
+   } else {
+     emscripten_proxy_async(emscripten_proxy_get_system_queue(), t, proxied_raise, (void*)(intptr_t)sig);
++    // The proxied raise() only runs when the target returns to its event loop
++    // or runs its system queue. Wake it in case it is blocked in
++    // emscripten_futex_wait: a blocking WasmFS syscall then runs the queue and
++    // fails with EINTR once the handler has run, as a signal interrupts a
++    // blocked syscall on Linux. Other waits just re-check and wait again.
++    _emscripten_thread_notify(t);
+   }
+   return 0;
+ }
+diff --git a/system/lib/standalone/standalone.c b/system/lib/standalone/standalone.c
+index 1d5bfeb..fab1b16 100644
+--- a/system/lib/standalone/standalone.c
++++ b/system/lib/standalone/standalone.c
+@@ -74,6 +74,29 @@ weak int __syscall_poll_nonblocking(struct pollfd *fds, nfds_t nfds) {
+   return -ENOSYS;
+ }
+ 
++weak int __syscall_epoll_create1(int flags) {
++  return -ENOSYS;
++}
++
++weak int __syscall_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
++  return -ENOSYS;
++}
++
++weak int __syscall_epoll_pwait(int epfd, struct epoll_event *ev, int maxevents,
++                               int timeout, const sigset_t *sigmask,
++                               size_t sigsetsize) {
++  return -ENOSYS;
++}
++
++weak int __syscall_epoll_pwait_nonblocking(int epfd, struct epoll_event *ev,
++                                           int maxevents) {
++  return -ENOSYS;
++}
++
++weak int __syscall_eventfd2(unsigned int initval, int flags) {
++  return -ENOSYS;
++}
++
+ // open(), etc. - we just support the standard streams, with no
+ // corner case error checking; everything else is not permitted.
+ // TODO: full file support for WASI, or an option for it
+diff --git a/system/lib/wasmfs/epoll.cpp b/system/lib/wasmfs/epoll.cpp
+new file mode 100644
+index 0000000..eb10594
+--- /dev/null
++++ b/system/lib/wasmfs/epoll.cpp
+@@ -0,0 +1,523 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// epoll(7) over WasmFS stream files, with the semantics emscripten's JS FS
++// gained in #27207 (libepoll.js):
++//
++//  - A registration keys on the descriptor and its open file description, as
++//    Linux keys on (fd, struct file). Closing the description's last
++//    descriptor evicts it; a dup of the epoll fd is the same instance.
++//  - Each registration listens on its file. A notification that matches its
++//    events puts it on the ready list (and wakes the epoll's own listeners:
++//    waiters, and epolls that watch this one). epoll_wait takes registrations
++//    off the front of the list and re-checks each against the file's current
++//    readiness: a level-triggered one still ready goes back on the tail, an
++//    EPOLLET one waits for the next notification, an EPOLLONESHOT one is
++//    disarmed until EPOLL_CTL_MOD. Registrations a full wait did not reach
++//    stay at the front, so successive waits rotate through ready files.
++//  - EPOLL_CTL_ADD and EPOLL_CTL_MOD sample the file's level, so an
++//    already-ready file is reported without a further notification.
++//  - EPOLLERR and EPOLLHUP are always reported; EPOLLRDHUP only if asked for.
++//  - EPOLLEXCLUSIVE: of the epolls watching one file exclusively, each
++//    notification wakes one, in turn. It cannot be combined with
++//    EPOLLONESHOT, used on a nested epoll, or modified.
++//  - An epoll may watch another; loops, and chains of more than five epoll
++//    instances, fail with ELOOP.
++//  - epoll_event is 16 bytes (aligned, not x86-64's packed 12).
++// Locking: see the lock order in stream_file.h.
++
++#include <algorithm>
++#include <emscripten/syscalls.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <map>
++#include <signal.h>
++#include <sys/epoll.h>
++#include <vector>
++
++#include "file_table.h"
++#include "stream_file.h"
++#include "wasmfs.h"
++
++namespace wasmfs {
++
++namespace {
++
++// Linux's EP_MAX_NESTS (4) plus the leaf level.
++constexpr int MaxEpollDepth = 5;
++
++// The bits that configure a registration rather than ask for readiness.
++constexpr uint32_t ConfigEvents =
++  EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE | EPOLLWAKEUP;
++
++// What a registration for `events` reports.
++uint32_t reportable(uint32_t events) {
++  return (events & ~ConfigEvents) | EPOLLERR | EPOLLHUP;
++}
++
++// Serializes the loop and depth checks of an EPOLL_CTL_ADD that nests an
++// epoll. Taken before any epoll's mutex.
++std::mutex nestMutex;
++
++} // anonymous namespace
++
++class EpollFile final : public StreamFile {
++  struct Reg final : Listener {
++    EpollFile* ep;
++    int fd;
++    std::shared_ptr<StreamFile> file;
++    // Guarded by ep->readyMutex.
++    uint32_t events = 0;
++    uint64_t data = 0;
++    bool armed = true;
++    bool listed = false;
++    Reg* rdPrev = nullptr;
++    Reg* rdNext = nullptr;
++
++    bool notify(uint32_t ev) override;
++  };
++
++  // The interest set. mutex also serializes epoll_ctl, harvesting and poll().
++  std::mutex mutex;
++  std::map<std::pair<int, StreamFile*>, std::unique_ptr<Reg>> interest;
++
++  // The ready list.
++  std::mutex readyMutex;
++  Reg* rdHead = nullptr;
++  Reg* rdTail = nullptr;
++  size_t rdCount = 0;
++
++  // These two require readyMutex.
++  void listLocked(Reg* r) {
++    if (r->listed) {
++      return;
++    }
++    r->listed = true;
++    r->rdPrev = rdTail;
++    r->rdNext = nullptr;
++    if (rdTail) {
++      rdTail->rdNext = r;
++    } else {
++      rdHead = r;
++    }
++    rdTail = r;
++    rdCount++;
++  }
++  void unlistLocked(Reg* r) {
++    if (!r->listed) {
++      return;
++    }
++    r->listed = false;
++    if (r->rdPrev) {
++      r->rdPrev->rdNext = r->rdNext;
++    } else {
++      rdHead = r->rdNext;
++    }
++    if (r->rdNext) {
++      r->rdNext->rdPrev = r->rdPrev;
++    } else {
++      rdTail = r->rdPrev;
++    }
++    r->rdPrev = r->rdNext = nullptr;
++    rdCount--;
++  }
++
++  // Requires mutex. Destroys `r`.
++  void evict(Reg* r) {
++    // Once off the file's list, no notification can reach it.
++    r->file->removeListener(r);
++    {
++      std::lock_guard<std::mutex> lock(readyMutex);
++      unlistLocked(r);
++    }
++    auto key = std::make_pair(r->fd, r->file.get());
++    interest.erase(key);
++  }
++
++  // Requires mutex. Delivers up to maxevents ready registrations.
++  int harvest(epoll_event* out, int maxevents) {
++    size_t budget;
++    {
++      std::lock_guard<std::mutex> lock(readyMutex);
++      budget = rdCount;
++    }
++    // Notifications only append, and only ctl (excluded by mutex) removes, so
++    // popping `budget` entries visits exactly what was listed on entry.
++    int n = 0;
++    while (budget-- && n < maxevents) {
++      Reg* r;
++      uint32_t events;
++      uint64_t data;
++      bool armed;
++      {
++        std::lock_guard<std::mutex> lock(readyMutex);
++        r = rdHead;
++        if (!r) {
++          break;
++        }
++        unlistLocked(r);
++        events = r->events;
++        data = r->data;
++        armed = r->armed;
++      }
++      if (r->file->isClosed()) {
++        evict(r);
++        continue;
++      }
++      if (!armed) {
++        continue;
++      }
++      uint32_t revents = r->file->poll() & reportable(events);
++      if (!revents) {
++        // The edge is gone (another reader drained it).
++        continue;
++      }
++      out[n].events = revents;
++      out[n].data.u64 = data;
++      n++;
++      std::lock_guard<std::mutex> lock(readyMutex);
++      if (events & EPOLLONESHOT) {
++        r->armed = false;
++      } else if (!(events & EPOLLET)) {
++        listLocked(r);
++      }
++    }
++    return n;
++  }
++
++  // The longest chain of epolls from this one down (this one counts), or -1
++  // if `goal` is on it. Requires nestMutex and goal's mutex; never takes the
++  // latter.
++  int chainDepth(EpollFile* goal) {
++    if (this == goal) {
++      return -1;
++    }
++    std::vector<std::shared_ptr<StreamFile>> children;
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      for (auto& [key, reg] : interest) {
++        if (reg->file->asEpoll()) {
++          children.push_back(reg->file);
++        }
++      }
++    }
++    int deepest = 0;
++    for (auto& child : children) {
++      int depth = child->asEpoll()->chainDepth(goal);
++      if (depth < 0) {
++        return -1;
++      }
++      deepest = std::max(deepest, depth);
++    }
++    return 1 + deepest;
++  }
++
++  int open(oflags_t) override { return 0; }
++
++  int close() override {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      for (auto& [key, reg] : interest) {
++        reg->file->removeListener(reg.get());
++      }
++      {
++        std::lock_guard<std::mutex> readyLock(readyMutex);
++        rdHead = rdTail = nullptr;
++        rdCount = 0;
++      }
++      interest.clear();
++    }
++    closeAndNotify();
++    return 0;
++  }
++
++  off_t getSize() override { return 0; }
++
++public:
++  EpollFile() : StreamFile(S_IRUSR | S_IWUSR, 0) {}
++
++  // close() has normally emptied the interest set; never leave a watched file
++  // pointing at a destroyed registration.
++  ~EpollFile() {
++    for (auto& [key, reg] : interest) {
++      reg->file->removeListener(reg.get());
++    }
++  }
++
++  EpollFile* asEpoll() override { return this; }
++
++  // Readable while a wait would deliver something.
++  uint32_t poll() override {
++    std::lock_guard<std::mutex> lock(mutex);
++    std::vector<std::pair<Reg*, uint32_t>> listed;
++    {
++      std::lock_guard<std::mutex> readyLock(readyMutex);
++      for (Reg* r = rdHead; r; r = r->rdNext) {
++        if (r->armed) {
++          listed.emplace_back(r, r->events);
++        }
++      }
++    }
++    for (auto& [r, events] : listed) {
++      if (!r->file->isClosed() && (r->file->poll() & reportable(events))) {
++        return ReadableEvents;
++      }
++    }
++    return 0;
++  }
++
++  ssize_t readv(const iovec* iov, int iovcnt, int flags) override {
++    return -EINVAL;
++  }
++  ssize_t writev(const iovec* iov, int iovcnt, int flags) override {
++    return -EINVAL;
++  }
++
++  int ctl(int op, int fd, const epoll_event* ev) {
++    auto openFile = wasmFS.getFileTable().locked().getEntry(fd);
++    if (!openFile) {
++      return -EBADF;
++    }
++    std::shared_ptr<StreamFile> target;
++    {
++      auto locked = openFile->locked();
++      if (auto dataFile = locked.getFile()->dynCast<DataFile>()) {
++        if (auto* stream = dataFile->asStream()) {
++          target = stream->sharedStream();
++        }
++      }
++    }
++    if (op != EPOLL_CTL_ADD && op != EPOLL_CTL_MOD && op != EPOLL_CTL_DEL) {
++      return -EINVAL;
++    }
++    // Regular files have no readiness to watch.
++    if (!target) {
++      return -EPERM;
++    }
++    if (target.get() == this) {
++      return -EINVAL;
++    }
++    if (op != EPOLL_CTL_DEL && !ev) {
++      return -EFAULT;
++    }
++    uint32_t events = op == EPOLL_CTL_DEL ? 0 : ev->events;
++    uint64_t data = op == EPOLL_CTL_DEL ? 0 : ev->data.u64;
++    EpollFile* nested = target->asEpoll();
++
++    std::unique_lock<std::mutex> nestLock(nestMutex, std::defer_lock);
++    if (nested && op == EPOLL_CTL_ADD) {
++      nestLock.lock();
++    }
++    std::lock_guard<std::mutex> lock(mutex);
++
++    auto key = std::make_pair(fd, target.get());
++    auto it = interest.find(key);
++    Reg* r = it == interest.end() ? nullptr : it->second.get();
++    switch (op) {
++      case EPOLL_CTL_DEL:
++        if (!r) {
++          return -ENOENT;
++        }
++        evict(r);
++        return 0;
++      case EPOLL_CTL_ADD: {
++        if (r) {
++          return -EEXIST;
++        }
++        if ((events & EPOLLEXCLUSIVE) && ((events & EPOLLONESHOT) || nested)) {
++          return -EINVAL;
++        }
++        if (nested) {
++          int depth = nested->chainDepth(this);
++          if (depth < 0 || 1 + depth > MaxEpollDepth) {
++            return -ELOOP;
++          }
++        }
++        auto reg = std::make_unique<Reg>();
++        reg->ep = this;
++        reg->fd = fd;
++        reg->file = target;
++        reg->events = events;
++        reg->data = data;
++        // The registration filters for itself: its events change under
++        // readyMutex while it stays on the file's list.
++        reg->interest = ~0u;
++        reg->exclusive = events & EPOLLEXCLUSIVE;
++        r = reg.get();
++        interest.emplace(key, std::move(reg));
++        target->addListener(r);
++        break;
++      }
++      case EPOLL_CTL_MOD: {
++        if (!r) {
++          return -ENOENT;
++        }
++        if ((events | r->events) & EPOLLEXCLUSIVE) {
++          return -EINVAL;
++        }
++        std::lock_guard<std::mutex> readyLock(readyMutex);
++        r->events = events;
++        r->data = data;
++        r->armed = true;
++        break;
++      }
++    }
++    // Arming is itself an edge: report a file that is already ready.
++    if (target->poll() & reportable(events)) {
++      {
++        std::lock_guard<std::mutex> readyLock(readyMutex);
++        listLocked(r);
++      }
++      notify(ReadableEvents);
++    }
++    return 0;
++  }
++
++  int wait(epoll_event* out, int maxevents, int timeoutMs) {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      int n = harvest(out, maxevents);
++      if (n || timeoutMs == 0 || !Blocker::canBlock()) {
++        return n;
++      }
++    }
++    Blocker blocker(timeoutMs, Blocker::Interruptible);
++    blocker.watch(sharedStream(), ReadableEvents);
++    while (true) {
++      blocker.arm();
++      {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        int n = harvest(out, maxevents);
++        if (n) {
++          return n;
++        }
++      }
++      int err = blocker.wait();
++      if (err == -ETIMEDOUT) {
++        return 0;
++      }
++      if (err) {
++        return err;
++      }
++    }
++  }
++};
++
++bool EpollFile::Reg::notify(uint32_t ev) {
++  {
++    std::lock_guard<std::mutex> lock(ep->readyMutex);
++    // A closing file is listed even when disarmed, so a wait evicts it.
++    if (!(ev & StreamClosedEvent) &&
++        (!armed || !(ev & (events | EPOLLERR | EPOLLHUP)))) {
++      return false;
++    }
++    ep->listLocked(this);
++  }
++  ep->notify(ReadableEvents);
++  return true;
++}
++
++namespace {
++
++EpollFile* getEpoll(int epfd, std::shared_ptr<StreamFile>& holder, int& err) {
++  auto openFile = wasmFS.getFileTable().locked().getEntry(epfd);
++  if (!openFile) {
++    err = -EBADF;
++    return nullptr;
++  }
++  auto locked = openFile->locked();
++  auto dataFile = locked.getFile()->dynCast<DataFile>();
++  StreamFile* stream = dataFile ? dataFile->asStream() : nullptr;
++  if (!stream || !stream->asEpoll()) {
++    err = -EINVAL;
++    return nullptr;
++  }
++  holder = stream->sharedStream();
++  return stream->asEpoll();
++}
++
++int validateWait(struct epoll_event* ev, int maxevents) {
++  if (maxevents <= 0 || maxevents > INT_MAX / (int)sizeof(epoll_event)) {
++    return -EINVAL;
++  }
++  if (!ev) {
++    return -EFAULT;
++  }
++  return 0;
++}
++
++} // anonymous namespace
++
++} // namespace wasmfs
++
++using namespace wasmfs;
++
++extern "C" {
++
++int __syscall_epoll_create1(int flags) {
++  // EPOLL_CLOEXEC is accepted and means nothing: there is no exec.
++  if (flags & ~EPOLL_CLOEXEC) {
++    return -EINVAL;
++  }
++  return addStreamDescriptor(std::make_shared<EpollFile>(), O_RDWR);
++}
++
++int __syscall_epoll_ctl(int epfd, int op, int fd, struct epoll_event* ev) {
++  std::shared_ptr<StreamFile> holder;
++  int err;
++  EpollFile* ep = getEpoll(epfd, holder, err);
++  if (!ep) {
++    return err;
++  }
++  return ep->ctl(op, fd, ev);
++}
++
++int __syscall_epoll_pwait(int epfd,
++                          struct epoll_event* ev,
++                          int maxevents,
++                          int timeout,
++                          const sigset_t* sigmask,
++                          size_t sigsetsize) {
++  if (int err = validateWait(ev, maxevents)) {
++    return err;
++  }
++  std::shared_ptr<StreamFile> holder;
++  int err;
++  EpollFile* ep = getEpoll(epfd, holder, err);
++  if (!ep) {
++    return err;
++  }
++  sigset_t old;
++  if (sigmask) {
++    pthread_sigmask(SIG_SETMASK, sigmask, &old);
++  }
++  int n = ep->wait(ev, maxevents, timeout);
++  if (sigmask) {
++    pthread_sigmask(SIG_SETMASK, &old, nullptr);
++  }
++  return n;
++}
++
++// libc routes zero-timeout epoll_wait()/epoll_pwait() here (musl's epoll.c).
++int __syscall_epoll_pwait_nonblocking(int epfd,
++                                      struct epoll_event* ev,
++                                      int maxevents) {
++  if (int err = validateWait(ev, maxevents)) {
++    return err;
++  }
++  std::shared_ptr<StreamFile> holder;
++  int err;
++  EpollFile* ep = getEpoll(epfd, holder, err);
++  if (!ep) {
++    return err;
++  }
++  return ep->wait(ev, maxevents, 0);
++}
++
++} // extern "C"
+diff --git a/system/lib/wasmfs/eventfd.cpp b/system/lib/wasmfs/eventfd.cpp
+new file mode 100644
+index 0000000..09a15ea
+--- /dev/null
++++ b/system/lib/wasmfs/eventfd.cpp
+@@ -0,0 +1,147 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// eventfd(2): a 64-bit counter. A read returns it and resets it to zero (or,
++// with EFD_SEMAPHORE, returns 1 and decrements it), blocking while it is zero;
++// a write adds to it, blocking while that would pass 0xfffffffffffffffe.
++
++#include <algorithm>
++#include <emscripten/syscalls.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <sys/eventfd.h>
++
++#include "stream_file.h"
++
++namespace wasmfs {
++
++namespace {
++
++constexpr uint64_t EventFdMax = UINT64_MAX - 1;
++
++// Gathers exactly 8 bytes from the iovecs, or scatters 8 bytes into them.
++void gather8(const iovec* iov, int iovcnt, uint8_t out[8]) {
++  size_t done = 0;
++  for (int i = 0; i < iovcnt && done < 8; i++) {
++    size_t n = std::min(iov[i].iov_len, 8 - done);
++    memcpy(out + done, iov[i].iov_base, n);
++    done += n;
++  }
++}
++
++void scatter8(const iovec* iov, int iovcnt, const uint8_t in[8]) {
++  size_t done = 0;
++  for (int i = 0; i < iovcnt && done < 8; i++) {
++    size_t n = std::min(iov[i].iov_len, 8 - done);
++    memcpy(iov[i].iov_base, in + done, n);
++    done += n;
++  }
++}
++
++class EventFdFile final : public StreamFile {
++  std::mutex mutex;
++  uint64_t count;
++  const bool semaphore;
++
++  int open(oflags_t) override { return 0; }
++  int close() override {
++    closeAndNotify();
++    return 0;
++  }
++  off_t getSize() override { return 0; }
++
++public:
++  EventFdFile(uint64_t initial, bool semaphore)
++    : StreamFile(S_IRUSR | S_IWUSR, 0), count(initial), semaphore(semaphore) {
++  }
++
++  uint32_t poll() override {
++    std::lock_guard<std::mutex> lock(mutex);
++    uint32_t mask = 0;
++    if (count) {
++      mask |= ReadableEvents;
++    }
++    if (count < EventFdMax) {
++      mask |= WritableEvents;
++    }
++    return mask;
++  }
++
++  ssize_t readv(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len < 0) {
++      return len;
++    }
++    if (len < 8) {
++      return -EINVAL;
++    }
++    uint64_t value = 0;
++    ssize_t result = blockUntil(
++      this, ReadableEvents, flags, -1, Blocker::Restartable, [&]() -> ssize_t {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        if (!count) {
++          return -EAGAIN;
++        }
++        value = semaphore ? 1 : count;
++        count -= value;
++        return 8;
++      });
++    if (result == 8) {
++      scatter8(iov, iovcnt, (const uint8_t*)&value);
++      notify(WritableEvents);
++    }
++    return result;
++  }
++
++  ssize_t writev(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len < 0) {
++      return len;
++    }
++    if (len < 8) {
++      return -EINVAL;
++    }
++    uint64_t value;
++    gather8(iov, iovcnt, (uint8_t*)&value);
++    if (value == UINT64_MAX) {
++      return -EINVAL;
++    }
++    ssize_t result = blockUntil(
++      this, WritableEvents, flags, -1, Blocker::Restartable, [&]() -> ssize_t {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        if (EventFdMax - count < value) {
++          return -EAGAIN;
++        }
++        count += value;
++        return 8;
++      });
++    if (result == 8 && value) {
++      notify(ReadableEvents);
++    }
++    return result;
++  }
++};
++
++} // anonymous namespace
++
++} // namespace wasmfs
++
++using namespace wasmfs;
++
++extern "C" int __syscall_eventfd2(unsigned int initval, int flags) {
++  if (flags & ~(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE)) {
++    return -EINVAL;
++  }
++  auto file = std::make_shared<EventFdFile>(initval, flags & EFD_SEMAPHORE);
++  return addStreamDescriptor(file,
++                             O_RDWR | ((flags & EFD_NONBLOCK) ? O_NONBLOCK : 0));
++}
+diff --git a/system/lib/wasmfs/file.h b/system/lib/wasmfs/file.h
+index 7e299cd..fe57abf 100644
+--- a/system/lib/wasmfs/file.h
++++ b/system/lib/wasmfs/file.h
+@@ -28,6 +28,7 @@ namespace wasmfs {
+ class Backend;
+ class Directory;
+ class Symlink;
++class StreamFile;
+ 
+ // This represents an opaque pointer to a Backend. A user may use this to
+ // specify a backend in file operations.
+@@ -160,6 +161,12 @@ public:
+     : File(File::DataFileKind, mode | fileType, backend) {}
+   virtual ~DataFile() = default;
+ 
++  // Pipes, sockets, eventfds and epoll instances are StreamFiles (see
++  // stream_file.h): the syscall layer reads, writes and polls them without
++  // holding this file's lock, so a read can block while another thread writes
++  // or closes. Everything else returns null. (WasmFS has no RTTI.)
++  virtual StreamFile* asStream() { return nullptr; }
++
+   class Handle;
+   Handle locked();
+ };
+diff --git a/system/lib/wasmfs/file_table.h b/system/lib/wasmfs/file_table.h
+index e85d9b3..621e6d0 100644
+--- a/system/lib/wasmfs/file_table.h
++++ b/system/lib/wasmfs/file_table.h
+@@ -94,6 +94,10 @@ public:
+ 
+     oflags_t getFlags() const { return openFileState->flags; };
+     void setFlags(oflags_t flags) { openFileState->flags = flags; };
++
++    // Release the lock early, e.g. before a stream read that may block. The
++    // Handle must not be used afterwards.
++    void unlock() { lock.unlock(); }
+   };
+ 
+   Handle locked() { return Handle(shared_from_this()); }
+diff --git a/system/lib/wasmfs/inet_socket.cpp b/system/lib/wasmfs/inet_socket.cpp
+new file mode 100644
+index 0000000..f1bf238
+--- /dev/null
++++ b/system/lib/wasmfs/inet_socket.cpp
+@@ -0,0 +1,889 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// AF_INET and AF_INET6 sockets over a transport the embedder supplies in JS
++// (src/lib/libwasmfs_sockets.js documents the interface).
++//
++// SOCK_STREAM sockets connect out; there is no listen() or accept().
++// SOCK_DGRAM sockets exist so that code probing for them works, but every send
++// fails with ENETUNREACH and nothing is ever received.
++//
++// One dedicated network pthread owns the transport: syscalls post connect,
++// send, shutdown and close to it (emscripten_proxy_async) and never wait on
++// it; the transport's events arrive on it and call back into the
++// wasmfs_socket_on_* functions below, which update the socket and notify its
++// listeners. The main browser thread is never involved. Without pthreads the
++// transport runs inline on the calling thread.
++//
++// A socket's sends queue in its send ring until the network thread hands them
++// to the transport; they then count as in flight until the transport reports
++// them drained. Ring plus in-flight bytes are bounded by SO_SNDBUF: past it a
++// write blocks (or fails with EAGAIN) and EPOLLOUT clears. Received bytes go
++// into the receive ring; when it holds SO_RCVBUF bytes the transport is asked
++// to pause, and to resume once a reader drains it to half that. A transport
++// without pause() makes the ring grow without bound.
++
++#include <algorithm>
++#include <arpa/inet.h>
++#include <emscripten/console.h>
++#include <emscripten/emscripten.h>
++#include <emscripten/proxying.h>
++#include <emscripten/syscalls.h>
++#include <emscripten/threading.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <functional>
++#include <netinet/in.h>
++#include <pthread.h>
++#include <string.h>
++#include <string>
++#include <unordered_map>
++
++#include "resolver.h"
++#include "socket_file.h"
++
++extern "C" {
++// libwasmfs_sockets.js. All but the first run on the network thread only.
++void _wasmfs_socket_thread_init(em_proxying_queue* queue);
++void _wasmfs_socket_connect(uint32_t id,
++                            const char* host,
++                            int port,
++                            int family);
++void _wasmfs_socket_send(uint32_t id, const uint8_t* buf, size_t len);
++void _wasmfs_socket_shutdown(uint32_t id);
++void _wasmfs_socket_close(uint32_t id, int abort);
++void _wasmfs_socket_resume(uint32_t id);
++}
++
++namespace wasmfs {
++
++namespace {
++
++// Linux's usual initial window and a receive bound that rides out a burst.
++constexpr size_t DefaultSendBuffer = 256 * 1024;
++constexpr size_t DefaultRecvBuffer = 1024 * 1024;
++
++// The local address getsockname() reports once connected: a NAT-style one.
++constexpr uint32_t FakeLocalV4 = 0x0A00020F; // 10.0.2.15
++
++std::atomic<uint32_t> nextSocketId{1};
++std::atomic<uint32_t> nextEphemeral{0};
++
++uint16_t ephemeralPort() {
++  // Linux's default ip_local_port_range, 32768-60999.
++  return 32768 + nextEphemeral.fetch_add(1) % 28232;
++}
++
++class NetworkThread {
++public:
++  // Runs `task` on the network thread, in order with the other tasks.
++  static void post(std::function<void()>&& task);
++
++private:
++#ifdef __EMSCRIPTEN_PTHREADS__
++  emscripten::ProxyingQueue queue;
++  pthread_t thread;
++  bool started = false;
++
++  NetworkThread() {
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++    started = pthread_create(&thread, &attr, run, this) == 0;
++    pthread_attr_destroy(&attr);
++  }
++
++  static void* run(void* arg) {
++    auto* self = (NetworkThread*)arg;
++    _wasmfs_socket_thread_init(self->queue.queue);
++    // Sit in the event loop: proxied tasks and transport events run there.
++    emscripten_exit_with_live_runtime();
++  }
++#endif
++};
++
++void NetworkThread::post(std::function<void()>&& task) {
++#ifdef __EMSCRIPTEN_PTHREADS__
++  // Started on first use (the first connect), never destroyed. Callers hold no
++  // lock: from a worker, pthread_create waits for the main thread.
++  static NetworkThread* instance = new NetworkThread();
++  if (instance->started) {
++    if (pthread_equal(pthread_self(), instance->thread)) {
++      task();
++    } else if (!instance->queue.proxyAsync(instance->thread,
++                                           std::move(task))) {
++      emscripten_err("wasmfs: could not post to the network thread");
++    }
++    return;
++  }
++  // No thread could be started: run the transport here.
++#endif
++  task();
++}
++
++// Where a connect() goes, as the transport sees it.
++struct Target {
++  std::string host;
++  uint16_t port = 0;
++  // 4 or 6 for an address literal, 0 for a hostname.
++  int family = 0;
++};
++
++class InetSocket;
++
++std::mutex registryMutex;
++// Sockets the transport knows, by id. Ids are never reused, so a late event
++// for a closed socket finds nothing.
++std::unordered_map<uint32_t, std::shared_ptr<InetSocket>> registry;
++
++std::shared_ptr<InetSocket> findSocket(uint32_t id) {
++  std::lock_guard<std::mutex> lock(registryMutex);
++  auto it = registry.find(id);
++  return it == registry.end() ? nullptr : it->second;
++}
++
++bool unmapV4(const in6_addr& a6, in_addr& a4) {
++  if (!IN6_IS_ADDR_V4MAPPED(&a6)) {
++    return false;
++  }
++  memcpy(&a4, &a6.s6_addr[12], 4);
++  return true;
++}
++
++class InetSocket final : public SocketFile {
++public:
++  const uint32_t id;
++
++  InetSocket(int domain, int type, int protocol)
++    : SocketFile(domain, type, protocol, DefaultSendBuffer, DefaultRecvBuffer),
++      id(nextSocketId.fetch_add(1)) {}
++
++  // Transport events, on the network thread.
++
++  void onOpen() {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (state != State::Connecting) {
++        return;
++      }
++      state = State::Connected;
++    }
++    notify(WritableEvents);
++  }
++
++  // Returns whether the transport should pause.
++  bool onData(const uint8_t* buf, size_t len) {
++    bool pause = false;
++    uint32_t events = ReadableEvents;
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (state == State::Connecting) {
++        // A transport that skipped open().
++        state = State::Connected;
++        events |= WritableEvents;
++      }
++      if (state != State::Connected || shutRead || isClosed()) {
++        return false;
++      }
++      recv.push(buf, len);
++      if (!recvPaused && recv.size() >= recvBufferSize()) {
++        recvPaused = pause = true;
++      }
++    }
++    notify(events);
++    return pause;
++  }
++
++  // The peer's FIN.
++  void onEnd() {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (state != State::Connected) {
++        return;
++      }
++      peerShut = true;
++    }
++    notify(ReadableEvents | EPOLLRDHUP | EPOLLHUP);
++  }
++
++  void onDrained(size_t len) {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      inFlight -= std::min(len, inFlight);
++    }
++    notify(WritableEvents);
++  }
++
++  // The connection is gone: refused (while connecting), reset (err), or
++  // closed in order (err 0).
++  void onClose(int err) {
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (state == State::Connecting) {
++        state = State::Failed;
++        error = err ? err : ECONNREFUSED;
++      } else if (state == State::Connected) {
++        state = State::Closed;
++        if (err) {
++          error = err;
++          reset = true;
++        } else {
++          peerShut = true;
++        }
++      } else {
++        return;
++      }
++      send.clear();
++      inFlight = 0;
++    }
++    notify(AllEvents);
++  }
++
++  // Network thread: hand the send ring to the transport.
++  void flushSends() {
++    // Only the network thread uses it.
++    static std::vector<uint8_t> scratch;
++    size_t n;
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      flushQueued = false;
++      n = send.size();
++      if (!n) {
++        return;
++      }
++      if (state != State::Connected) {
++        send.clear();
++        return;
++      }
++      scratch.resize(n);
++      send.pop(scratch.data(), n);
++      inFlight += n;
++    }
++    _wasmfs_socket_send(id, scratch.data(), n);
++  }
++
++  uint32_t poll() override {
++    std::lock_guard<std::mutex> lock(mutex);
++    if (type == SOCK_DGRAM) {
++      return WritableEvents;
++    }
++    uint32_t mask = 0;
++    switch (state) {
++      case State::Fresh:
++        // As Linux reports an unconnected TCP socket.
++        return WritableEvents | EPOLLHUP;
++      case State::Connecting:
++        return 0;
++      default:
++        break;
++    }
++    bool rcvShut = recvShutLocked();
++    bool sndShut = sendShutLocked();
++    if (!recv.empty() || rcvShut) {
++      mask |= ReadableEvents;
++    }
++    if (rcvShut) {
++      mask |= EPOLLRDHUP;
++    }
++    if (rcvShut && sndShut) {
++      mask |= EPOLLHUP;
++    }
++    if (sndShut || send.size() + inFlight < sendBufferSize()) {
++      mask |= WritableEvents;
++    }
++    if (error) {
++      mask |= EPOLLERR;
++    }
++    return mask;
++  }
++
++  ssize_t readv(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len <= 0) {
++      return len;
++    }
++    if (flags & MSG_OOB) {
++      // There is never urgent data.
++      return -EINVAL;
++    }
++    bool peek = flags & MSG_PEEK;
++    bool waitAll = (flags & MSG_WAITALL) && !peek;
++    size_t done = 0;
++    bool resume = false;
++    ssize_t result = blockUntil(
++      this,
++      ReadableEvents | EPOLLRDHUP,
++      flags,
++      recvTimeoutMs(),
++      Blocker::Restartable,
++      [&]() -> ssize_t {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        if (type == SOCK_DGRAM) {
++          return -EAGAIN;
++        }
++        if (!recv.empty()) {
++          done += recv.readv(iov, iovcnt, done, peek);
++          if (recvPaused && recv.size() <= recvBufferSize() / 2) {
++            recvPaused = false;
++            resume = true;
++          }
++          if (!waitAll || done == (size_t)len) {
++            return done;
++          }
++        }
++        if (done) {
++          // MSG_WAITALL stops short at EOF or an error.
++          return (recvShutLocked() || error) ? (ssize_t)done : -EAGAIN;
++        }
++        if (error && (state == State::Failed || state == State::Closed)) {
++          int err = error;
++          error = 0;
++          return -err;
++        }
++        if (recvShutLocked()) {
++          return 0;
++        }
++        if (state == State::Fresh) {
++          return -ENOTCONN;
++        }
++        return -EAGAIN;
++      });
++    if (resume) {
++      auto self = shared();
++      NetworkThread::post([self]() { _wasmfs_socket_resume(self->id); });
++    }
++    if (result < 0 && done) {
++      return done;
++    }
++    return result;
++  }
++
++  ssize_t writev(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len < 0) {
++      return len;
++    }
++    size_t done = 0;
++    ssize_t result = blockUntil(
++      this,
++      WritableEvents,
++      flags,
++      sendTimeoutMs(),
++      Blocker::Restartable,
++      [&]() -> ssize_t {
++        std::unique_lock<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        if (type == SOCK_DGRAM) {
++          // UDP is not supported.
++          return -ENETUNREACH;
++        }
++        if (state == State::Failed || state == State::Closed) {
++          int err = error ? error : EPIPE;
++          error = 0;
++          return done ? (ssize_t)done : -err;
++        }
++        if (shutWrite) {
++          // No SIGPIPE: its default action would end the program.
++          return done ? (ssize_t)done : -EPIPE;
++        }
++        if (state == State::Fresh) {
++          return -ENOTCONN;
++        }
++        if (state == State::Connecting) {
++          return -EAGAIN;
++        }
++        if (len == 0) {
++          return 0;
++        }
++        size_t cap = sendBufferSize();
++        size_t used = send.size() + inFlight;
++        if (used >= cap) {
++          return -EAGAIN;
++        }
++        done += send.writev(
++          iov, iovcnt, done, std::min(cap - used, (size_t)len - done));
++        bool needFlush = !flushQueued;
++        flushQueued = true;
++        lock.unlock();
++        if (needFlush) {
++          auto self = shared();
++          NetworkThread::post([self]() { self->flushSends(); });
++        }
++        return done == (size_t)len ? (ssize_t)done : -EAGAIN;
++      });
++    if (result < 0 && done) {
++      return done;
++    }
++    return result;
++  }
++
++  int bind(const sockaddr* addr, socklen_t len) override {
++    sockaddr_storage ss;
++    if (int err = copyAddress(addr, len, ss, false)) {
++      return err;
++    }
++    std::lock_guard<std::mutex> lock(mutex);
++    if (bound || state != State::Fresh || peerSet) {
++      return -EINVAL;
++    }
++    uint16_t* port = portOf(ss);
++    if (!*port) {
++      *port = htons(ephemeralPort());
++    }
++    localPort = ntohs(*port);
++    local = ss;
++    bound = true;
++    return 0;
++  }
++
++  int connect(const sockaddr* addr, socklen_t len, bool nonblock) override {
++    sockaddr_storage ss;
++    if (type == SOCK_DGRAM) {
++      // Records the default destination; sends still fail.
++      if (int err = copyAddress(addr, len, ss, true)) {
++        return err;
++      }
++      std::lock_guard<std::mutex> lock(mutex);
++      if (ss.ss_family == AF_UNSPEC) {
++        peerSet = false;
++        return 0;
++      }
++      peer = ss;
++      peerSet = true;
++      if (!localPort) {
++        localPort = ephemeralPort();
++      }
++      return 0;
++    }
++    if (int err = copyAddress(addr, len, ss, false)) {
++      return err;
++    }
++    Target target;
++    bool v6only =
++      domain == AF_INET6 && intOption(IPPROTO_IPV6, IPV6_V6ONLY, 0);
++    if (int err = targetFor(ss, v6only, target)) {
++      return err;
++    }
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (isClosed()) {
++        return -EBADF;
++      }
++      switch (state) {
++        case State::Connecting:
++          return -EALREADY;
++        case State::Connected:
++          return -EISCONN;
++        case State::Failed:
++        case State::Closed: {
++          // This socket's one connection is over.
++          int err = error ? error : ECONNABORTED;
++          error = 0;
++          return -err;
++        }
++        case State::Fresh:
++          break;
++      }
++      state = State::Connecting;
++      peer = ss;
++      peerSet = true;
++      transportUsed = true;
++      if (!localPort) {
++        localPort = ephemeralPort();
++      }
++    }
++    auto self = shared();
++    {
++      std::lock_guard<std::mutex> lock(registryMutex);
++      registry[id] = self;
++    }
++    NetworkThread::post([self, target]() {
++      _wasmfs_socket_connect(
++        self->id, target.host.c_str(), target.port, target.family);
++    });
++    if (nonblock || !Blocker::canBlock()) {
++      return -EINPROGRESS;
++    }
++    ssize_t result = blockUntil(
++      this,
++      WritableEvents,
++      0,
++      sendTimeoutMs(),
++      Blocker::Restartable,
++      [&]() -> ssize_t {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        switch (state) {
++          case State::Connecting:
++            return -EAGAIN;
++          case State::Connected:
++            return 0;
++          default: {
++            int err = error ? error : ECONNREFUSED;
++            error = 0;
++            return -err;
++          }
++        }
++      });
++    // SO_SNDTIMEO expired: the attempt goes on, as on Linux.
++    return result == -EAGAIN ? -EINPROGRESS : result;
++  }
++
++  int shutdown(int how) override {
++    if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
++      return -EINVAL;
++    }
++    bool fin = false;
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      if (type == SOCK_DGRAM ? !peerSet
++                             : (state == State::Fresh ||
++                                state == State::Connecting ||
++                                state == State::Failed)) {
++        return -ENOTCONN;
++      }
++      if (how != SHUT_WR) {
++        shutRead = true;
++      }
++      if (how != SHUT_RD && !shutWrite) {
++        shutWrite = true;
++        fin = state == State::Connected;
++      }
++    }
++    notify(AllEvents);
++    if (fin) {
++      // After any queued flush: tasks run in order.
++      auto self = shared();
++      NetworkThread::post([self]() {
++        self->flushSends();
++        _wasmfs_socket_shutdown(self->id);
++      });
++    }
++    return 0;
++  }
++
++  int getsockname(sockaddr* addr, socklen_t* len) override {
++    std::lock_guard<std::mutex> lock(mutex);
++    bool connected = peerSet && state != State::Fresh;
++    if (type == SOCK_DGRAM) {
++      connected = peerSet;
++    }
++    if (domain == AF_INET) {
++      sockaddr_in sin = {};
++      if (bound) {
++        memcpy(&sin, &local, sizeof(sin));
++      }
++      sin.sin_family = AF_INET;
++      sin.sin_port = htons(localPort);
++      if (connected && sin.sin_addr.s_addr == htonl(INADDR_ANY)) {
++        sin.sin_addr.s_addr = htonl(FakeLocalV4);
++      }
++      return copySockaddrOut(&sin, sizeof(sin), addr, len);
++    }
++    sockaddr_in6 sin6 = {};
++    if (bound) {
++      memcpy(&sin6, &local, sizeof(sin6));
++    }
++    sin6.sin6_family = AF_INET6;
++    sin6.sin6_port = htons(localPort);
++    if (connected && IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
++      in_addr peer4;
++      if (unmapV4(((sockaddr_in6&)peer).sin6_addr, peer4)) {
++        // ::ffff:10.0.2.15
++        sin6.sin6_addr.s6_addr[10] = sin6.sin6_addr.s6_addr[11] = 0xff;
++        uint32_t v4 = htonl(FakeLocalV4);
++        memcpy(&sin6.sin6_addr.s6_addr[12], &v4, 4);
++      } else {
++        // fd00::2, a unique local address.
++        sin6.sin6_addr.s6_addr[0] = 0xfd;
++        sin6.sin6_addr.s6_addr[15] = 2;
++      }
++    }
++    return copySockaddrOut(&sin6, sizeof(sin6), addr, len);
++  }
++
++  int getpeername(sockaddr* addr, socklen_t* len) override {
++    std::lock_guard<std::mutex> lock(mutex);
++    bool connected = type == SOCK_DGRAM
++                       ? peerSet
++                       : (state == State::Connected ||
++                          (state == State::Closed && !reset));
++    if (!connected) {
++      return -ENOTCONN;
++    }
++    return copySockaddrOut(&peer,
++                           domain == AF_INET ? sizeof(sockaddr_in)
++                                             : sizeof(sockaddr_in6),
++                           addr,
++                           len);
++  }
++
++private:
++  enum class State {
++    Fresh,      // never connected
++    Connecting, // waiting for the transport
++    Connected,
++    Failed,     // the connection attempt failed (error says how)
++    Closed,     // the transport closed or reset an open connection
++  };
++
++  // Guards everything below.
++  std::mutex mutex;
++  State state = State::Fresh;
++  int error = 0; // SO_ERROR
++  bool reset = false;
++  bool peerShut = false; // the peer's FIN arrived
++  bool shutRead = false;
++  bool shutWrite = false;
++  // connect() reached the transport, so close() must release it there.
++  bool transportUsed = false;
++  ByteRing recv;
++  bool recvPaused = false;
++  ByteRing send;
++  size_t inFlight = 0;
++  bool flushQueued = false;
++  bool bound = false;
++  sockaddr_storage local = {};
++  uint16_t localPort = 0;
++  bool peerSet = false;
++  sockaddr_storage peer = {};
++
++  std::shared_ptr<InetSocket> shared() {
++    return std::static_pointer_cast<InetSocket>(shared_from_this());
++  }
++
++  bool recvShutLocked() const {
++    return peerShut || shutRead || state == State::Failed ||
++           state == State::Closed;
++  }
++  bool sendShutLocked() const {
++    return shutWrite || state == State::Failed || state == State::Closed;
++  }
++
++  static uint16_t* portOf(sockaddr_storage& ss) {
++    return ss.ss_family == AF_INET ? &((sockaddr_in&)ss).sin_port
++                                   : &((sockaddr_in6&)ss).sin6_port;
++  }
++
++  // Validates an address for this socket's family and copies it.
++  int copyAddress(const sockaddr* addr,
++                  socklen_t len,
++                  sockaddr_storage& out,
++                  bool allowUnspec) {
++    if (!addr) {
++      return -EFAULT;
++    }
++    if (len < sizeof(sa_family_t)) {
++      return -EINVAL;
++    }
++    out = {};
++    if (allowUnspec && addr->sa_family == AF_UNSPEC) {
++      return 0;
++    }
++    if (domain == AF_INET) {
++      if (addr->sa_family != AF_INET) {
++        return -EAFNOSUPPORT;
++      }
++      if (len < sizeof(sockaddr_in)) {
++        return -EINVAL;
++      }
++      memcpy(&out, addr, sizeof(sockaddr_in));
++    } else {
++      if (addr->sa_family != AF_INET6) {
++        return -EAFNOSUPPORT;
++      }
++      // RFC 2133's sockaddr_in6 lacked sin6_scope_id; Linux takes both.
++      if (len < 24) {
++        return -EINVAL;
++      }
++      memcpy(&out, addr, std::min<size_t>(len, sizeof(sockaddr_in6)));
++    }
++    return 0;
++  }
++
++  static int targetFor(sockaddr_storage& ss, bool v6only, Target& target) {
++    in_addr a4;
++    if (ss.ss_family == AF_INET) {
++      auto& sin = (sockaddr_in&)ss;
++      a4 = sin.sin_addr;
++      target.port = ntohs(sin.sin_port);
++    } else {
++      auto& sin6 = (sockaddr_in6&)ss;
++      target.port = ntohs(sin6.sin6_port);
++      if (!unmapV4(sin6.sin6_addr, a4)) {
++        char buf[INET6_ADDRSTRLEN];
++        if (IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
++          // Linux connects to the loopback address.
++          target.host = "::1";
++        } else {
++          inet_ntop(AF_INET6, &sin6.sin6_addr, buf, sizeof(buf));
++          target.host = buf;
++        }
++        target.family = 6;
++        return 0;
++      }
++      if (v6only) {
++        return -ENETUNREACH;
++      }
++    }
++    if (a4.s_addr == htonl(INADDR_ANY)) {
++      a4.s_addr = htonl(INADDR_LOOPBACK);
++    }
++    if (lookupFakeAddress(a4, target.host)) {
++      target.family = 0;
++      return 0;
++    }
++    char buf[INET_ADDRSTRLEN];
++    inet_ntop(AF_INET, &a4, buf, sizeof(buf));
++    target.host = buf;
++    target.family = 4;
++    return 0;
++  }
++
++  int open(oflags_t) override { return 0; }
++
++  int close() override {
++    struct linger linger;
++    bool abort = lingerOption(&linger) && linger.l_onoff && !linger.l_linger;
++    bool release;
++    {
++      std::lock_guard<std::mutex> lock(mutex);
++      release = transportUsed;
++      recv.clear();
++      if (abort) {
++        send.clear();
++      }
++    }
++    {
++      std::lock_guard<std::mutex> lock(registryMutex);
++      registry.erase(id);
++    }
++    closeAndNotify();
++    if (release) {
++      // Queued bytes still go out first, unless SO_LINGER asks for a reset.
++      auto self = shared();
++      NetworkThread::post([self, abort]() {
++        if (!abort) {
++          self->flushSends();
++        }
++        _wasmfs_socket_close(self->id, abort);
++      });
++    }
++    return 0;
++  }
++
++  off_t getSize() override {
++    std::lock_guard<std::mutex> lock(mutex);
++    return recv.size();
++  }
++
++  int takeError() override {
++    std::lock_guard<std::mutex> lock(mutex);
++    int err = error;
++    error = 0;
++    return err;
++  }
++
++  bool supportsLevel(int level) override {
++    switch (level) {
++      case IPPROTO_IP:
++        return true;
++      case IPPROTO_IPV6:
++        return domain == AF_INET6;
++      case IPPROTO_TCP:
++        return type == SOCK_STREAM;
++      default:
++        return false;
++    }
++  }
++
++  // A bigger SO_SNDBUF may make room.
++  void buffersChanged() override { notify(WritableEvents); }
++};
++
++} // anonymous namespace
++
++} // namespace wasmfs
++
++using namespace wasmfs;
++
++extern "C" {
++
++int __syscall_socket(
++  int domain, int type, int protocol, int unused1, int unused2, int unused3) {
++  int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
++  type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
++  if (domain != AF_INET && domain != AF_INET6) {
++    // AF_UNIX sockets only come from socketpair().
++    return -EAFNOSUPPORT;
++  }
++  switch (type) {
++    case SOCK_STREAM:
++      if (protocol && protocol != IPPROTO_TCP) {
++        return -EPROTONOSUPPORT;
++      }
++      protocol = IPPROTO_TCP;
++      break;
++    case SOCK_DGRAM:
++      if (protocol && protocol != IPPROTO_UDP && protocol != IPPROTO_ICMP &&
++          protocol != IPPROTO_ICMPV6) {
++        return -EPROTONOSUPPORT;
++      }
++      if (!protocol) {
++        protocol = IPPROTO_UDP;
++      }
++      break;
++    case SOCK_RAW:
++      // As for an unprivileged process on Linux.
++      return -EPERM;
++    default:
++      return -EINVAL;
++  }
++  auto socket = std::make_shared<InetSocket>(domain, type, protocol);
++  return addStreamDescriptor(socket,
++                             O_RDWR | ((flags & SOCK_NONBLOCK) ? O_NONBLOCK : 0));
++}
++
++// Transport events (libwasmfs_sockets.js), on the network thread.
++
++EMSCRIPTEN_KEEPALIVE void wasmfs_socket_on_open(uint32_t id) {
++  if (auto socket = findSocket(id)) {
++    socket->onOpen();
++  }
++}
++
++// Returns 1 if the transport should pause this socket's receiving.
++EMSCRIPTEN_KEEPALIVE int
++wasmfs_socket_on_data(uint32_t id, const uint8_t* buf, size_t len) {
++  auto socket = findSocket(id);
++  return socket && socket->onData(buf, len);
++}
++
++EMSCRIPTEN_KEEPALIVE void wasmfs_socket_on_end(uint32_t id) {
++  if (auto socket = findSocket(id)) {
++    socket->onEnd();
++  }
++}
++
++EMSCRIPTEN_KEEPALIVE void wasmfs_socket_on_drained(uint32_t id, size_t len) {
++  if (auto socket = findSocket(id)) {
++    socket->onDrained(len);
++  }
++}
++
++EMSCRIPTEN_KEEPALIVE void wasmfs_socket_on_close(uint32_t id, int err) {
++  if (auto socket = findSocket(id)) {
++    socket->onClose(err);
++  }
++}
++
++} // extern "C"
+diff --git a/system/lib/wasmfs/pipe_backend.h b/system/lib/wasmfs/pipe_backend.h
+index 3336f28..73d46ad 100644
+--- a/system/lib/wasmfs/pipe_backend.h
++++ b/system/lib/wasmfs/pipe_backend.h
+@@ -5,59 +5,124 @@
+ 
+ #pragma once
+ 
+-#include <queue>
+-
+-#include "file.h"
++#include "stream_file.h"
+ #include "support.h"
+ 
+ namespace wasmfs {
+ 
+-// The data shared between the two sides of a pipe.
+-// TODO: Consider switching to a ring buffer for performance and code size if we
+-//       don't need unbounded pipes.
+-using PipeData = std::queue<uint8_t>;
++// The state the two ends of a pipe share. A pipe is unbounded, as WasmFS pipes
++// always were, so a write never blocks.
++struct PipeData {
++  std::mutex mutex;
++  ByteRing bytes;
++  // Open ends, counted by open() and close().
++  int readers = 0;
++  int writers = 0;
++  // Set once by pipe2() before either end has a descriptor.
++  std::weak_ptr<StreamFile> readEnd, writeEnd;
++};
+ 
+-// A PipeFile is a simple file that has a reference to a PipeData that it
+-// either reads from or writes to. A pair of PipeFiles comprise the two ends of
+-// a pipe.
+-class PipeFile : public DataFile {
++// One end of a pipe. Reading an empty pipe blocks (or fails with EAGAIN) while
++// a write end is open, and returns 0 (EOF) once none is.
++class PipeFile : public StreamFile {
+   std::shared_ptr<PipeData> data;
++  const bool isReadEnd;
+ 
+-  int open(oflags_t) override { return 0; }
+-  int close() override { return 0; }
++  int open(oflags_t) override {
++    std::lock_guard<std::mutex> lock(data->mutex);
++    (isReadEnd ? data->readers : data->writers)++;
++    return 0;
++  }
+ 
+-  ssize_t write(const uint8_t* buf, size_t len, off_t offset) override {
+-    for (size_t i = 0; i < len; i++) {
+-      data->push(buf[i]);
++  int close() override {
++    {
++      std::lock_guard<std::mutex> lock(data->mutex);
++      (isReadEnd ? data->readers : data->writers)--;
+     }
+-    return len;
++    closeAndNotify();
++    // The other end sees EPOLLHUP (no writers) or EPOLLERR (no readers).
++    if (auto other = (isReadEnd ? data->writeEnd : data->readEnd).lock()) {
++      other->notify(isReadEnd ? EPOLLERR : (EPOLLHUP | ReadableEvents));
++    }
++    return 0;
++  }
++
++  // Bytes in the pipe, on either end (FIONREAD reads this, as on Linux).
++  off_t getSize() override {
++    std::lock_guard<std::mutex> lock(data->mutex);
++    return data->bytes.size();
+   }
+ 
+-  ssize_t read(uint8_t* buf, size_t len, off_t offset) override {
+-    for (size_t i = 0; i < len; i++) {
+-      if (data->empty()) {
+-        return i;
++public:
++  uint32_t poll() override {
++    std::lock_guard<std::mutex> lock(data->mutex);
++    uint32_t mask = 0;
++    if (isReadEnd) {
++      if (!data->bytes.empty()) {
++        mask |= ReadableEvents;
++      }
++      if (!data->writers) {
++        mask |= EPOLLHUP;
++      }
++    } else {
++      mask |= WritableEvents;
++      if (!data->readers) {
++        mask |= EPOLLERR;
+       }
+-      buf[i] = data->front();
+-      data->pop();
+     }
+-    return len;
++    return mask;
+   }
+ 
+-  int flush() override { return 0; }
+-
+-  off_t getSize() override { return data->size(); }
+-
+-  // TODO: Should this return an error?
+-  int setSize(off_t size) override { return 0; }
++  ssize_t readv(const iovec* iov, int iovcnt, int flags) override {
++    if (!isReadEnd) {
++      return -EBADF;
++    }
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len <= 0) {
++      return len;
++    }
++    return blockUntil(this,
++                      ReadableEvents | EPOLLHUP,
++                      flags,
++                      -1,
++                      Blocker::Restartable,
++                      [&]() -> ssize_t {
++                        std::lock_guard<std::mutex> lock(data->mutex);
++                        if (isClosed()) {
++                          return -EBADF;
++                        }
++                        if (!data->bytes.empty()) {
++                          return data->bytes.readv(iov, iovcnt, 0, false);
++                        }
++                        return data->writers ? -EAGAIN : 0;
++                      });
++  }
+ 
+-public:
+-  // PipeFiles do not have or need a backend. Pass NullBackend to the parent for
+-  // that.
+-  PipeFile(mode_t mode, std::shared_ptr<PipeData> data)
+-    : DataFile(mode, NullBackend), data(data) {
+-    // Reads are always from the front; writes always to the end.
+-    seekable = false;
++  ssize_t writev(const iovec* iov, int iovcnt, int flags) override {
++    if (isReadEnd) {
++      return -EBADF;
++    }
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len <= 0) {
++      return len;
++    }
++    {
++      std::lock_guard<std::mutex> lock(data->mutex);
++      if (!data->readers) {
++        // No SIGPIPE: its default action would end the program.
++        return -EPIPE;
++      }
++      data->bytes.writev(iov, iovcnt, 0, len);
++    }
++    if (auto reader = data->readEnd.lock()) {
++      reader->notify(ReadableEvents);
++    }
++    return len;
+   }
++
++  // PipeFiles do not have or need a backend.
++  PipeFile(mode_t mode, std::shared_ptr<PipeData> data, bool isReadEnd)
++    : StreamFile(mode, S_IFIFO), data(data), isReadEnd(isReadEnd) {}
+ };
++
+ } // namespace wasmfs
+diff --git a/system/lib/wasmfs/resolver.cpp b/system/lib/wasmfs/resolver.cpp
+new file mode 100644
+index 0000000..968ec2a
+--- /dev/null
++++ b/system/lib/wasmfs/resolver.cpp
+@@ -0,0 +1,352 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// Name resolution for WasmFS builds, in C: getaddrinfo, getnameinfo and
++// _emscripten_lookup_name (behind gethostbyname*). They replace the JS
++// versions in libcore.js, which proxy synchronously to the main thread: a
++// definition here wins because the linker only leaves a symbol to JS when no
++// linked archive defines it.
++//
++// A hostname resolves to a fake IPv4 address in 240.67.0.0/16, the same one
++// for the life of the program; connect() maps it back to the name, which the
++// transport resolves (see resolver.h). Numeric addresses pass through, and
++// "localhost" is the loopback address. Results follow the JS getaddrinfo: a
++// single entry; AF_UNSPEC yields IPv4, and an AF_INET6 request for a hostname
++// yields the IPv4-mapped address ::ffff:240.67.x.y.
++
++#include "resolver.h"
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <mutex>
++#include <netdb.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <sys/socket.h>
++#include <unordered_map>
++#include <vector>
++
++namespace wasmfs {
++
++namespace {
++
++constexpr uint32_t FakeNet = 0xF0430000; // 240.67.0.0, host order
++constexpr size_t MaxFakeIds = 0xFFFE;    // 240.67.0.1 .. 240.67.255.254
++
++std::mutex fakeMutex;
++std::unordered_map<std::string, uint32_t> fakeIds;
++std::vector<std::string> fakeNames; // fakeNames[id - 1]
++
++// The fake address for `name`, in network order, or 0 once all are taken.
++in_addr_t fakeAddressFor(const char* name) {
++  std::lock_guard<std::mutex> lock(fakeMutex);
++  uint32_t id;
++  auto it = fakeIds.find(name);
++  if (it != fakeIds.end()) {
++    id = it->second;
++  } else {
++    if (fakeNames.size() >= MaxFakeIds) {
++      return 0;
++    }
++    fakeNames.emplace_back(name);
++    id = fakeNames.size();
++    fakeIds.emplace(name, id);
++  }
++  return htonl(FakeNet | id);
++}
++
++bool isLocalhost(const char* name) {
++  return !strcasecmp(name, "localhost") ||
++         !strcasecmp(name, "localhost.localdomain");
++}
++
++// The IPv4 address inside an IPv4-mapped IPv6 address.
++bool unmapV4(const in6_addr& a6, in_addr& a4) {
++  if (!IN6_IS_ADDR_V4MAPPED(&a6)) {
++    return false;
++  }
++  memcpy(&a4, &a6.s6_addr[12], 4);
++  return true;
++}
++
++in6_addr mapV4(in_addr a4) {
++  in6_addr a6 = {};
++  a6.s6_addr[10] = a6.s6_addr[11] = 0xff;
++  memcpy(&a6.s6_addr[12], &a4, 4);
++  return a6;
++}
++
++// One addrinfo, laid out for emscripten's freeaddrinfo (libc's
++// musl/src/network/freeaddrinfo.c): it frees ai_addr, then the entry, so the
++// two are separate allocations and ai_canonname lives inside the entry's.
++int makeAddrinfo(int family,
++                 int type,
++                 int proto,
++                 const void* addr,
++                 uint16_t port,
++                 const char* canon,
++                 addrinfo** res) {
++  size_t canonLen = canon ? strlen(canon) + 1 : 0;
++  socklen_t salen =
++    family == AF_INET6 ? sizeof(sockaddr_in6) : sizeof(sockaddr_in);
++  auto* ai = (addrinfo*)calloc(1, sizeof(addrinfo) + canonLen);
++  auto* sa = (sockaddr*)calloc(1, salen);
++  if (!ai || !sa) {
++    free(ai);
++    free(sa);
++    return EAI_MEMORY;
++  }
++  if (family == AF_INET6) {
++    auto* sin6 = (sockaddr_in6*)sa;
++    sin6->sin6_family = AF_INET6;
++    sin6->sin6_port = htons(port);
++    memcpy(&sin6->sin6_addr, addr, sizeof(in6_addr));
++  } else {
++    auto* sin = (sockaddr_in*)sa;
++    sin->sin_family = AF_INET;
++    sin->sin_port = htons(port);
++    memcpy(&sin->sin_addr, addr, sizeof(in_addr));
++  }
++  ai->ai_family = family;
++  ai->ai_socktype = type;
++  ai->ai_protocol = proto;
++  ai->ai_addrlen = salen;
++  ai->ai_addr = sa;
++  if (canon) {
++    ai->ai_canonname = (char*)(ai + 1);
++    memcpy(ai->ai_canonname, canon, canonLen);
++  }
++  *res = ai;
++  return 0;
++}
++
++// Writes `s` to a getnameinfo buffer; EAI_OVERFLOW if it does not fit.
++int copyName(const char* s, char* out, socklen_t outLen) {
++  size_t len = strlen(s);
++  if (len >= outLen) {
++    return EAI_OVERFLOW;
++  }
++  memcpy(out, s, len + 1);
++  return 0;
++}
++
++} // anonymous namespace
++
++bool lookupFakeAddress(in_addr addr, std::string& name) {
++  uint32_t a = ntohl(addr.s_addr);
++  if ((a & 0xFFFF0000) != FakeNet) {
++    return false;
++  }
++  uint32_t id = a & 0xFFFF;
++  std::lock_guard<std::mutex> lock(fakeMutex);
++  if (id == 0 || id > fakeNames.size()) {
++    return false;
++  }
++  name = fakeNames[id - 1];
++  return true;
++}
++
++} // namespace wasmfs
++
++using namespace wasmfs;
++
++extern "C" {
++
++int getaddrinfo(const char* node,
++                const char* service,
++                const struct addrinfo* hint,
++                struct addrinfo** res) {
++  int flags = 0, family = AF_UNSPEC, type = 0, proto = 0;
++  if (hint) {
++    flags = hint->ai_flags;
++    family = hint->ai_family;
++    type = hint->ai_socktype;
++    proto = hint->ai_protocol;
++  }
++  if (type && !proto) {
++    proto = type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
++  }
++  if (!type && proto) {
++    type = proto == IPPROTO_UDP ? SOCK_DGRAM : SOCK_STREAM;
++  }
++  // With no type asked for this should return one entry per type; one TCP
++  // entry is what callers that pass NULL hints use.
++  if (!proto) {
++    proto = IPPROTO_TCP;
++  }
++  if (!type) {
++    type = SOCK_STREAM;
++  }
++
++  if (!node && !service) {
++    return EAI_NONAME;
++  }
++  if (flags & ~(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_NUMERICSERV |
++                AI_V4MAPPED | AI_ALL | AI_ADDRCONFIG)) {
++    return EAI_BADFLAGS;
++  }
++  if ((flags & AI_CANONNAME) && !node) {
++    return EAI_BADFLAGS;
++  }
++  // AI_ADDRCONFIG is accepted: both families are "configured".
++  if (type != SOCK_STREAM && type != SOCK_DGRAM) {
++    return EAI_SOCKTYPE;
++  }
++  if (family != AF_UNSPEC && family != AF_INET && family != AF_INET6) {
++    return EAI_FAMILY;
++  }
++
++  uint16_t port = 0;
++  if (service) {
++    char* end;
++    unsigned long p = strtoul(service, &end, 10);
++    if (!*service || *end || p > 65535) {
++      // There is no services database.
++      return (flags & AI_NUMERICSERV) ? EAI_NONAME : EAI_SERVICE;
++    }
++    port = p;
++  }
++
++  const char* canon = (flags & AI_CANONNAME) ? node : nullptr;
++  in_addr a4;
++  in6_addr a6;
++
++  if (!node) {
++    if (family == AF_INET6) {
++      a6 = (flags & AI_PASSIVE) ? in6addr_any : in6addr_loopback;
++      return makeAddrinfo(AF_INET6, type, proto, &a6, port, nullptr, res);
++    }
++    a4.s_addr = htonl((flags & AI_PASSIVE) ? INADDR_ANY : INADDR_LOOPBACK);
++    return makeAddrinfo(AF_INET, type, proto, &a4, port, nullptr, res);
++  }
++
++  // A numeric address.
++  if (inet_pton(AF_INET, node, &a4) == 1) {
++    if (family != AF_INET6) {
++      return makeAddrinfo(AF_INET, type, proto, &a4, port, canon, res);
++    }
++    if (!(flags & AI_V4MAPPED)) {
++      return EAI_NONAME;
++    }
++    a6 = mapV4(a4);
++    return makeAddrinfo(AF_INET6, type, proto, &a6, port, canon, res);
++  }
++  if (inet_pton(AF_INET6, node, &a6) == 1) {
++    if (family == AF_INET) {
++      return EAI_NONAME;
++    }
++    return makeAddrinfo(AF_INET6, type, proto, &a6, port, canon, res);
++  }
++  if (flags & AI_NUMERICHOST) {
++    return EAI_NONAME;
++  }
++
++  // A name.
++  if (isLocalhost(node)) {
++    if (family == AF_INET6) {
++      return makeAddrinfo(
++        AF_INET6, type, proto, &in6addr_loopback, port, canon, res);
++    }
++    a4.s_addr = htonl(INADDR_LOOPBACK);
++    return makeAddrinfo(AF_INET, type, proto, &a4, port, canon, res);
++  }
++  a4.s_addr = fakeAddressFor(node);
++  if (!a4.s_addr) {
++    return EAI_MEMORY;
++  }
++  if (family == AF_INET6) {
++    a6 = mapV4(a4);
++    return makeAddrinfo(AF_INET6, type, proto, &a6, port, canon, res);
++  }
++  return makeAddrinfo(AF_INET, type, proto, &a4, port, canon, res);
++}
++
++int getnameinfo(const struct sockaddr* sa,
++                socklen_t salen,
++                char* host,
++                socklen_t hostlen,
++                char* serv,
++                socklen_t servlen,
++                int flags) {
++  if (!sa) {
++    return EAI_FAMILY;
++  }
++  in_addr a4;
++  bool isV4 = false;
++  uint16_t port;
++  const void* addr;
++  char numeric[INET6_ADDRSTRLEN];
++  if (sa->sa_family == AF_INET) {
++    if (salen < sizeof(sockaddr_in)) {
++      return EAI_FAMILY;
++    }
++    auto* sin = (const sockaddr_in*)sa;
++    a4 = sin->sin_addr;
++    isV4 = true;
++    addr = &sin->sin_addr;
++    port = ntohs(sin->sin_port);
++    inet_ntop(AF_INET, addr, numeric, sizeof(numeric));
++  } else if (sa->sa_family == AF_INET6) {
++    if (salen < sizeof(sockaddr_in6)) {
++      return EAI_FAMILY;
++    }
++    auto* sin6 = (const sockaddr_in6*)sa;
++    isV4 = unmapV4(sin6->sin6_addr, a4);
++    addr = &sin6->sin6_addr;
++    port = ntohs(sin6->sin6_port);
++    inet_ntop(AF_INET6, addr, numeric, sizeof(numeric));
++  } else {
++    return EAI_FAMILY;
++  }
++
++  if (host && hostlen) {
++    std::string name;
++    bool named = false;
++    if (!(flags & NI_NUMERICHOST)) {
++      if (isV4) {
++        named = lookupFakeAddress(a4, name);
++        if (!named && a4.s_addr == htonl(INADDR_LOOPBACK)) {
++          name = "localhost";
++          named = true;
++        }
++      } else if (IN6_IS_ADDR_LOOPBACK((const in6_addr*)addr)) {
++        name = "localhost";
++        named = true;
++      }
++    }
++    if (!named && (flags & NI_NAMEREQD)) {
++      return EAI_NONAME;
++    }
++    if (int err = copyName(named ? name.c_str() : numeric, host, hostlen)) {
++      return err;
++    }
++  }
++  if (serv && servlen) {
++    // There is no services database: always the number.
++    char buf[8];
++    snprintf(buf, sizeof(buf), "%u", (unsigned)port);
++    if (int err = copyName(buf, serv, servlen)) {
++      return err;
++    }
++  }
++  return 0;
++}
++
++// What gethostbyname*() resolve through (libc's lookup_name.c): the IPv4
++// address for `name`, in network order.
++uint32_t _emscripten_lookup_name(const char* name) {
++  in_addr a4;
++  if (inet_pton(AF_INET, name, &a4) == 1) {
++    return a4.s_addr;
++  }
++  if (isLocalhost(name)) {
++    return htonl(INADDR_LOOPBACK);
++  }
++  return fakeAddressFor(name);
++}
++
++} // extern "C"
+diff --git a/system/lib/wasmfs/resolver.h b/system/lib/wasmfs/resolver.h
+new file mode 100644
+index 0000000..eb54dff
+--- /dev/null
++++ b/system/lib/wasmfs/resolver.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++#pragma once
++
++#include <netinet/in.h>
++#include <string>
++
++namespace wasmfs {
++
++// A browser cannot resolve names, so getaddrinfo() (resolver.cpp) gives each
++// hostname a fake IPv4 address in 240.67.0.0/16 (reserved space that is never
++// routed), and connect() hands the name, not the address, to the transport.
++//
++// If `addr` is one of those fake addresses, sets `name` to the hostname it
++// stands for and returns true.
++bool lookupFakeAddress(in_addr addr, std::string& name);
++
++} // namespace wasmfs
+diff --git a/system/lib/wasmfs/socket_file.cpp b/system/lib/wasmfs/socket_file.cpp
+new file mode 100644
+index 0000000..385b8e3
+--- /dev/null
++++ b/system/lib/wasmfs/socket_file.cpp
+@@ -0,0 +1,625 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// Socket options common to every socket, and socketpair(). See socket_file.h.
++
++#include "socket_file.h"
++
++#include <algorithm>
++#include <errno.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <string.h>
++#include <sys/time.h>
++
++namespace wasmfs {
++
++namespace {
++
++enum class OptionKind { Unknown, Bool, Int, Blob };
++
++// The options accepted and stored. Anything else at a supported level is
++// ENOPROTOOPT. Bool options read back as 0 or 1.
++OptionKind classifyOption(int level, int name) {
++  switch (level) {
++    case SOL_SOCKET:
++      switch (name) {
++        case SO_DEBUG:
++        case SO_REUSEADDR:
++        case SO_DONTROUTE:
++        case SO_BROADCAST:
++        case SO_KEEPALIVE:
++        case SO_OOBINLINE:
++        case SO_NO_CHECK:
++        case SO_REUSEPORT:
++        case SO_PASSCRED:
++        case SO_TIMESTAMP:
++        case SO_TIMESTAMPNS:
++        case SO_ZEROCOPY:
++          return OptionKind::Bool;
++        case SO_PRIORITY:
++        case SO_RCVLOWAT:
++        case SO_SNDLOWAT:
++        case SO_MARK:
++        case SO_BUSY_POLL:
++        case SO_INCOMING_CPU:
++          return OptionKind::Int;
++        case SO_LINGER:
++        case SO_BINDTODEVICE:
++          return OptionKind::Blob;
++      }
++      break;
++    case IPPROTO_TCP:
++      switch (name) {
++        case TCP_NODELAY:
++        case TCP_CORK:
++        case TCP_QUICKACK:
++        case TCP_FASTOPEN_CONNECT:
++          return OptionKind::Bool;
++        case TCP_MAXSEG:
++        case TCP_KEEPIDLE:
++        case TCP_KEEPINTVL:
++        case TCP_KEEPCNT:
++        case TCP_SYNCNT:
++        case TCP_LINGER2:
++        case TCP_DEFER_ACCEPT:
++        case TCP_WINDOW_CLAMP:
++        case TCP_USER_TIMEOUT:
++        case TCP_FASTOPEN:
++        case TCP_NOTSENT_LOWAT:
++          return OptionKind::Int;
++      }
++      break;
++    case IPPROTO_IP:
++      switch (name) {
++        case IP_MULTICAST_LOOP:
++        case IP_MULTICAST_ALL:
++        case IP_RECVTOS:
++        case IP_RECVERR:
++        case IP_PKTINFO:
++        case IP_FREEBIND:
++        case IP_BIND_ADDRESS_NO_PORT:
++          return OptionKind::Bool;
++        case IP_TOS:
++        case IP_TTL:
++        case IP_MULTICAST_TTL:
++        case IP_MTU_DISCOVER:
++          return OptionKind::Int;
++        case IP_OPTIONS:
++        case IP_MULTICAST_IF:
++        case IP_ADD_MEMBERSHIP:
++        case IP_DROP_MEMBERSHIP:
++        case IP_ADD_SOURCE_MEMBERSHIP:
++        case IP_DROP_SOURCE_MEMBERSHIP:
++        case IP_BLOCK_SOURCE:
++        case IP_UNBLOCK_SOURCE:
++          return OptionKind::Blob;
++      }
++      break;
++    case IPPROTO_IPV6:
++      switch (name) {
++        case IPV6_V6ONLY:
++        case IPV6_MULTICAST_LOOP:
++        case IPV6_MULTICAST_ALL:
++        case IPV6_RECVTCLASS:
++        case IPV6_RECVPKTINFO:
++          return OptionKind::Bool;
++        case IPV6_UNICAST_HOPS:
++        case IPV6_MULTICAST_HOPS:
++        case IPV6_MULTICAST_IF:
++        case IPV6_TCLASS:
++        case IPV6_MTU_DISCOVER:
++          return OptionKind::Int;
++        case IPV6_ADD_MEMBERSHIP:
++        case IPV6_DROP_MEMBERSHIP:
++          return OptionKind::Blob;
++      }
++      break;
++  }
++  return OptionKind::Unknown;
++}
++
++// What getsockopt reports for an int option nobody set (Linux's defaults).
++int defaultIntOption(int level, int name) {
++  switch (level) {
++    case IPPROTO_IP:
++      switch (name) {
++        case IP_TTL:
++          return 64;
++        case IP_MULTICAST_TTL:
++        case IP_MULTICAST_LOOP:
++        case IP_MULTICAST_ALL:
++          return 1;
++      }
++      break;
++    case IPPROTO_IPV6:
++      switch (name) {
++        case IPV6_UNICAST_HOPS:
++          return 64;
++        case IPV6_MULTICAST_HOPS:
++        case IPV6_MULTICAST_LOOP:
++        case IPV6_MULTICAST_ALL:
++          return 1;
++      }
++      break;
++    case IPPROTO_TCP:
++      switch (name) {
++        case TCP_MAXSEG:
++          return 1448;
++        case TCP_KEEPIDLE:
++          return 7200;
++        case TCP_KEEPINTVL:
++          return 75;
++        case TCP_KEEPCNT:
++          return 9;
++        case TCP_SYNCNT:
++          return 6;
++      }
++      break;
++  }
++  return 0;
++}
++
++int copyOptionOut(const void* value, socklen_t size, void* out, socklen_t* len) {
++  if (!out || !len) {
++    return -EFAULT;
++  }
++  if ((int)*len < 0) {
++    return -EINVAL;
++  }
++  socklen_t n = std::min(*len, size);
++  memcpy(out, value, n);
++  *len = n;
++  return 0;
++}
++
++// SO_SNDBUF / SO_RCVBUF: Linux doubles what is set (for bookkeeping
++// overhead) and reports the doubled value.
++size_t bufferSizeFor(int value) {
++  return 2 * (size_t)std::clamp(value, 2304, 2 * 1024 * 1024);
++}
++
++int timeoutToMs(const timeval& tv) {
++  if (tv.tv_usec < 0 || tv.tv_usec >= 1000000) {
++    return -EDOM;
++  }
++  if (tv.tv_sec < 0) {
++    return 0;
++  }
++  if (tv.tv_sec == 0 && tv.tv_usec == 0) {
++    return -1;
++  }
++  long long ms = (long long)tv.tv_sec * 1000 + (tv.tv_usec + 999) / 1000;
++  return (int)std::min<long long>(ms, INT32_MAX);
++}
++
++} // anonymous namespace
++
++SocketFile::SocketFile(int domain,
++                       int type,
++                       int protocol,
++                       size_t sendBuffer,
++                       size_t recvBuffer)
++  : StreamFile(S_IRWXUGO, S_IFSOCK), domain(domain), type(type),
++    protocol(protocol), sendBuffer(sendBuffer), recvBuffer(recvBuffer) {}
++
++int SocketFile::intOption(int level, int name, int otherwise) {
++  std::lock_guard<std::mutex> lock(optionsMutex);
++  for (auto& s : stored) {
++    if (s.level == level && s.name == name) {
++      int v = 0;
++      memcpy(&v, s.value, std::min<size_t>(s.len, sizeof(v)));
++      return v;
++    }
++  }
++  return otherwise;
++}
++
++bool SocketFile::lingerOption(struct linger* out) {
++  std::lock_guard<std::mutex> lock(optionsMutex);
++  for (auto& s : stored) {
++    if (s.level == SOL_SOCKET && s.name == SO_LINGER) {
++      memcpy(out, s.value, sizeof(*out));
++      return true;
++    }
++  }
++  return false;
++}
++
++int SocketFile::getsockopt(int level, int name, void* value, socklen_t* len) {
++  if (!value || !len) {
++    return -EFAULT;
++  }
++  if (level == SOL_SOCKET) {
++    int v;
++    switch (name) {
++      case SO_TYPE:
++        v = type;
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_DOMAIN:
++        v = domain;
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_PROTOCOL:
++        v = protocol;
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_ERROR:
++        v = takeError();
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_ACCEPTCONN:
++        v = 0;
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_SNDBUF:
++        v = (int)sendBufferSize();
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_RCVBUF:
++        v = (int)recvBufferSize();
++        return copyOptionOut(&v, sizeof(v), value, len);
++      case SO_RCVTIMEO:
++      case SO_SNDTIMEO: {
++        int ms = name == SO_RCVTIMEO ? recvTimeoutMs() : sendTimeoutMs();
++        timeval tv = {0, 0};
++        if (ms >= 0) {
++          tv.tv_sec = ms / 1000;
++          tv.tv_usec = (ms % 1000) * 1000;
++        }
++        return copyOptionOut(&tv, sizeof(tv), value, len);
++      }
++    }
++  } else if (!supportsLevel(level)) {
++    return -ENOPROTOOPT;
++  }
++  OptionKind kind = classifyOption(level, name);
++  if (kind == OptionKind::Unknown) {
++    return -ENOPROTOOPT;
++  }
++  {
++    std::lock_guard<std::mutex> lock(optionsMutex);
++    for (auto& s : stored) {
++      if (s.level == level && s.name == name) {
++        return copyOptionOut(s.value, s.len, value, len);
++      }
++    }
++  }
++  if (level == SOL_SOCKET && name == SO_LINGER) {
++    struct linger l = {0, 0};
++    return copyOptionOut(&l, sizeof(l), value, len);
++  }
++  if (kind == OptionKind::Blob) {
++    *len = 0;
++    return 0;
++  }
++  int v = defaultIntOption(level, name);
++  return copyOptionOut(&v, sizeof(v), value, len);
++}
++
++int SocketFile::setsockopt(int level,
++                           int name,
++                           const void* value,
++                           socklen_t len) {
++  if ((int)len < 0) {
++    return -EINVAL;
++  }
++  if (!value && len) {
++    return -EFAULT;
++  }
++  // Int-valued options. The IP level, like Linux, also takes a single byte.
++  int intValue = 0;
++  bool haveInt = false;
++  if (len >= sizeof(int)) {
++    memcpy(&intValue, value, sizeof(int));
++    haveInt = true;
++  } else if (level == IPPROTO_IP && len >= 1) {
++    intValue = *(const unsigned char*)value;
++    haveInt = true;
++  }
++
++  if (level == SOL_SOCKET) {
++    switch (name) {
++      case SO_TYPE:
++      case SO_DOMAIN:
++      case SO_PROTOCOL:
++      case SO_ERROR:
++      case SO_ACCEPTCONN:
++        return -ENOPROTOOPT;
++      case SO_SNDBUF:
++      case SO_SNDBUFFORCE:
++      case SO_RCVBUF:
++      case SO_RCVBUFFORCE:
++        if (!haveInt) {
++          return -EINVAL;
++        }
++        if (name == SO_SNDBUF || name == SO_SNDBUFFORCE) {
++          sendBuffer.store(bufferSizeFor(intValue));
++        } else {
++          recvBuffer.store(bufferSizeFor(intValue));
++        }
++        buffersChanged();
++        return 0;
++      case SO_RCVTIMEO:
++      case SO_SNDTIMEO: {
++        if (len < sizeof(timeval)) {
++          return -EINVAL;
++        }
++        timeval tv;
++        memcpy(&tv, value, sizeof(tv));
++        int ms = timeoutToMs(tv);
++        if (ms < -1) {
++          return ms;
++        }
++        (name == SO_RCVTIMEO ? recvTimeout : sendTimeout).store(ms);
++        return 0;
++      }
++    }
++  } else if (!supportsLevel(level)) {
++    return -ENOPROTOOPT;
++  }
++
++  OptionKind kind = classifyOption(level, name);
++  if (kind == OptionKind::Unknown) {
++    return -ENOPROTOOPT;
++  }
++  Stored s = {level, name, 0, {}};
++  if (kind == OptionKind::Blob) {
++    if (level == SOL_SOCKET && name == SO_LINGER && len < sizeof(linger)) {
++      return -EINVAL;
++    }
++    if (len > sizeof(s.value)) {
++      return -EINVAL;
++    }
++    memcpy(s.value, value, len);
++    s.len = len;
++  } else {
++    if (!haveInt) {
++      return -EINVAL;
++    }
++    if (kind == OptionKind::Bool) {
++      intValue = intValue != 0;
++    }
++    memcpy(s.value, &intValue, sizeof(intValue));
++    s.len = sizeof(intValue);
++  }
++  std::lock_guard<std::mutex> lock(optionsMutex);
++  for (auto& existing : stored) {
++    if (existing.level == level && existing.name == name) {
++      existing = s;
++      return 0;
++    }
++  }
++  stored.push_back(s);
++  return 0;
++}
++
++int copySockaddrOut(const void* addr,
++                    socklen_t size,
++                    sockaddr* out,
++                    socklen_t* len) {
++  if (!out || !len) {
++    return -EFAULT;
++  }
++  if ((int)*len < 0) {
++    return -EINVAL;
++  }
++  memcpy(out, addr, std::min(*len, size));
++  *len = size;
++  return 0;
++}
++
++// socketpair(AF_UNIX, SOCK_STREAM)
++
++namespace {
++
++struct UnixPair {
++  std::mutex mutex;
++  // in[i]: bytes end i has yet to read.
++  ByteRing in[2];
++  bool shutRead[2] = {false, false};
++  // Also set when the end closes.
++  bool shutWrite[2] = {false, false};
++  bool open[2] = {true, true};
++  // Set once by createSocketPair, before either end has a descriptor.
++  std::weak_ptr<StreamFile> ends[2];
++};
++
++// Linux's default for a unix socket's send buffer.
++constexpr size_t UnixBufferSize = 212992;
++
++class UnixSocket final : public SocketFile {
++  std::shared_ptr<UnixPair> pair;
++  const int side;
++
++  int other() const { return 1 - side; }
++
++  void notifyPeer(uint32_t events) {
++    if (auto peer = pair->ends[other()].lock()) {
++      peer->notify(events);
++    }
++  }
++
++  // Our read side is shut: by us, or by the peer shutting or closing its
++  // write side. Requires the pair lock.
++  bool recvShut() const {
++    return pair->shutRead[side] || pair->shutWrite[other()];
++  }
++  bool sendShut() const {
++    return pair->shutWrite[side] || !pair->open[other()] ||
++           pair->shutRead[other()];
++  }
++
++  int open(oflags_t) override { return 0; }
++
++  int close() override {
++    {
++      std::lock_guard<std::mutex> lock(pair->mutex);
++      pair->open[side] = false;
++      pair->shutRead[side] = pair->shutWrite[side] = true;
++      pair->in[side].clear();
++    }
++    closeAndNotify();
++    notifyPeer(AllEvents);
++    return 0;
++  }
++
++  off_t getSize() override {
++    std::lock_guard<std::mutex> lock(pair->mutex);
++    return pair->in[side].size();
++  }
++
++  bool supportsLevel(int level) override { return false; }
++
++public:
++  UnixSocket(std::shared_ptr<UnixPair> pair, int side)
++    : SocketFile(AF_UNIX, SOCK_STREAM, 0, UnixBufferSize, UnixBufferSize),
++      pair(pair), side(side) {}
++
++  uint32_t poll() override {
++    std::lock_guard<std::mutex> lock(pair->mutex);
++    uint32_t mask = 0;
++    bool rcvShut = recvShut();
++    bool sndShut = sendShut();
++    if (!pair->in[side].empty() || rcvShut) {
++      mask |= ReadableEvents;
++    }
++    if (rcvShut) {
++      mask |= EPOLLRDHUP;
++    }
++    if (rcvShut && sndShut) {
++      mask |= EPOLLHUP;
++    }
++    if (sndShut || pair->in[other()].size() < sendBufferSize()) {
++      mask |= WritableEvents;
++    }
++    return mask;
++  }
++
++  ssize_t readv(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len <= 0) {
++      return len;
++    }
++    bool peek = flags & MSG_PEEK;
++    bool waitAll = (flags & MSG_WAITALL) && !peek;
++    size_t done = 0;
++    ssize_t result = blockUntil(
++      this,
++      ReadableEvents | EPOLLRDHUP,
++      flags,
++      recvTimeoutMs(),
++      Blocker::Restartable,
++      [&]() -> ssize_t {
++        std::unique_lock<std::mutex> lock(pair->mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        auto& in = pair->in[side];
++        bool consumed = false;
++        if (!in.empty()) {
++          done += in.readv(iov, iovcnt, done, peek);
++          consumed = !peek;
++        }
++        // MSG_WAITALL stops short at EOF.
++        ssize_t result = (done && (!waitAll || done == (size_t)len)) ||
++                             recvShut()
++                           ? (ssize_t)done
++                           : -EAGAIN;
++        lock.unlock();
++        if (consumed) {
++          notifyPeer(WritableEvents);
++        }
++        return result;
++      });
++    if (result < 0 && done) {
++      return done;
++    }
++    return result;
++  }
++
++  ssize_t writev(const iovec* iov, int iovcnt, int flags) override {
++    ssize_t len = iovecLength(iov, iovcnt);
++    if (len <= 0) {
++      return len;
++    }
++    size_t done = 0;
++    ssize_t result = blockUntil(
++      this,
++      WritableEvents,
++      flags,
++      sendTimeoutMs(),
++      Blocker::Restartable,
++      [&]() -> ssize_t {
++        std::unique_lock<std::mutex> lock(pair->mutex);
++        if (isClosed()) {
++          return -EBADF;
++        }
++        if (sendShut()) {
++          // No SIGPIPE: its default action would end the program.
++          return done ? (ssize_t)done : -EPIPE;
++        }
++        auto& out = pair->in[other()];
++        size_t cap = sendBufferSize();
++        if (out.size() >= cap) {
++          return -EAGAIN;
++        }
++        done += out.writev(iov, iovcnt, done, std::min(cap - out.size(), len - done));
++        lock.unlock();
++        notifyPeer(ReadableEvents);
++        return done == (size_t)len ? (ssize_t)done : -EAGAIN;
++      });
++    if (result < 0 && done) {
++      return done;
++    }
++    return result;
++  }
++
++  int bind(const sockaddr* addr, socklen_t len) override { return -EINVAL; }
++
++  int connect(const sockaddr* addr, socklen_t len, bool nonblock) override {
++    return -EISCONN;
++  }
++
++  int shutdown(int how) override {
++    if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
++      return -EINVAL;
++    }
++    {
++      std::lock_guard<std::mutex> lock(pair->mutex);
++      if (how != SHUT_WR) {
++        pair->shutRead[side] = true;
++      }
++      if (how != SHUT_RD) {
++        pair->shutWrite[side] = true;
++      }
++    }
++    notify(AllEvents);
++    notifyPeer(AllEvents);
++    return 0;
++  }
++
++  // Both ends are unnamed: just the family.
++  int getsockname(sockaddr* addr, socklen_t* len) override {
++    sa_family_t family = AF_UNIX;
++    return copySockaddrOut(&family, sizeof(family), addr, len);
++  }
++  int getpeername(sockaddr* addr, socklen_t* len) override {
++    return getsockname(addr, len);
++  }
++};
++
++} // anonymous namespace
++
++int createSocketPair(int type, std::shared_ptr<SocketFile> ends[2]) {
++  if (type != SOCK_STREAM) {
++    return -EOPNOTSUPP;
++  }
++  auto pair = std::make_shared<UnixPair>();
++  auto a = std::make_shared<UnixSocket>(pair, 0);
++  auto b = std::make_shared<UnixSocket>(pair, 1);
++  pair->ends[0] = a;
++  pair->ends[1] = b;
++  ends[0] = a;
++  ends[1] = b;
++  return 0;
++}
++
++} // namespace wasmfs
+diff --git a/system/lib/wasmfs/socket_file.h b/system/lib/wasmfs/socket_file.h
+new file mode 100644
+index 0000000..a29e4e4
+--- /dev/null
++++ b/system/lib/wasmfs/socket_file.h
+@@ -0,0 +1,92 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// Sockets: the interface the socket syscalls dispatch through, option storage
++// common to every kind, and socketpair(). AF_INET/AF_INET6 sockets are in
++// inet_socket.cpp, linked only when socket() is.
++
++#pragma once
++
++#include <sys/socket.h>
++#include <vector>
++
++#include "stream_file.h"
++
++namespace wasmfs {
++
++class SocketFile : public StreamFile {
++public:
++  const int domain;   // AF_INET, AF_INET6 or AF_UNIX
++  const int type;     // SOCK_STREAM or SOCK_DGRAM, without SOCK_* flags
++  const int protocol; // as reported by SO_PROTOCOL
++
++  SocketFile(int domain,
++             int type,
++             int protocol,
++             size_t sendBuffer,
++             size_t recvBuffer);
++
++  SocketFile* asSocket() override { return this; }
++
++  virtual int bind(const sockaddr* addr, socklen_t len) = 0;
++  // `nonblock`: the descriptor is O_NONBLOCK.
++  virtual int connect(const sockaddr* addr, socklen_t len, bool nonblock) = 0;
++  // There are no inbound connections in a browser.
++  virtual int listen(int backlog) { return -EOPNOTSUPP; }
++  virtual int shutdown(int how) = 0;
++  virtual int getsockname(sockaddr* addr, socklen_t* len) = 0;
++  virtual int getpeername(sockaddr* addr, socklen_t* len) = 0;
++
++  int getsockopt(int level, int name, void* value, socklen_t* len);
++  int setsockopt(int level, int name, const void* value, socklen_t len);
++
++  // getsockopt/setsockopt's view of the buffer sizes (SO_SNDBUF, SO_RCVBUF:
++  // what was set, doubled as on Linux), which subclasses use as their bounds.
++  size_t sendBufferSize() const { return sendBuffer.load(); }
++  size_t recvBufferSize() const { return recvBuffer.load(); }
++
++protected:
++  // SO_RCVTIMEO / SO_SNDTIMEO in milliseconds, or -1 for none.
++  int recvTimeoutMs() const { return recvTimeout.load(); }
++  int sendTimeoutMs() const { return sendTimeout.load(); }
++
++  // An int-sized option's stored value, or `otherwise` if never set.
++  int intOption(int level, int name, int otherwise);
++  // SO_LINGER.
++  bool lingerOption(struct linger* out);
++
++  // SO_ERROR: the pending error, cleared by reading it.
++  virtual int takeError() { return 0; }
++  // Whether options at this level apply (SOL_SOCKET always does).
++  virtual bool supportsLevel(int level) = 0;
++  // SO_SNDBUF or SO_RCVBUF changed.
++  virtual void buffersChanged() {}
++
++private:
++  std::atomic<size_t> sendBuffer;
++  std::atomic<size_t> recvBuffer;
++  std::atomic<int> recvTimeout{-1};
++  std::atomic<int> sendTimeout{-1};
++
++  // Options with no effect here, stored so getsockopt returns what was set.
++  // Guarded by optionsMutex, which is a leaf lock.
++  struct Stored {
++    int level;
++    int name;
++    socklen_t len;
++    unsigned char value[32];
++  };
++  std::mutex optionsMutex;
++  std::vector<Stored> stored;
++};
++
++// Copies a socket address out to a caller's buffer with accept()/getsockname()
++// semantics: truncates to *len, then sets *len to the full size.
++int copySockaddrOut(const void* addr, socklen_t size, sockaddr* out, socklen_t* len);
++
++// socketpair(AF_UNIX, SOCK_STREAM): two connected in-memory sockets.
++int createSocketPair(int type, std::shared_ptr<SocketFile> ends[2]);
++
++} // namespace wasmfs
+diff --git a/system/lib/wasmfs/stream_file.cpp b/system/lib/wasmfs/stream_file.cpp
+new file mode 100644
+index 0000000..5b44c15
+--- /dev/null
++++ b/system/lib/wasmfs/stream_file.cpp
+@@ -0,0 +1,320 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// The parts of stream files every kind shares: listener lists, blocking with
++// interruption, and the byte ring. See stream_file.h.
++
++#include "stream_file.h"
++#include "file_table.h"
++#include "wasmfs.h"
++
++#include <algorithm>
++#include <emscripten/emscripten.h>
++#include <emscripten/threading.h>
++#include <errno.h>
++#include <limits.h>
++#include <math.h>
++#include <pthread.h>
++#include <string.h>
++
++extern "C" {
++// libc's raise.c: how many signal handlers raise() has run on this thread;
++// with `interrupting_only`, just those installed without SA_RESTART.
++unsigned int _emscripten_signals_handled(int interrupting_only);
++}
++
++namespace wasmfs {
++
++// ByteRing
++
++void ByteRing::reserve(size_t need) {
++  size_t cap = buf.size();
++  if (need <= cap) {
++    return;
++  }
++  size_t newCap = cap ? cap : 4096;
++  while (newCap < need) {
++    newCap *= 2;
++  }
++  std::vector<uint8_t> next(newCap);
++  peek(next.data(), count);
++  buf.swap(next);
++  head = 0;
++}
++
++void ByteRing::clear() {
++  head = count = 0;
++  std::vector<uint8_t>().swap(buf);
++}
++
++void ByteRing::push(const uint8_t* data, size_t len) {
++  if (!len) {
++    return;
++  }
++  reserve(count + len);
++  size_t mask = buf.size() - 1;
++  size_t tail = (head + count) & mask;
++  size_t first = std::min(len, buf.size() - tail);
++  memcpy(&buf[tail], data, first);
++  memcpy(&buf[0], data + first, len - first);
++  count += len;
++}
++
++size_t ByteRing::peek(uint8_t* out, size_t len, size_t skip) const {
++  if (skip >= count) {
++    return 0;
++  }
++  len = std::min(len, count - skip);
++  if (!len) {
++    return 0;
++  }
++  size_t start = (head + skip) & (buf.size() - 1);
++  size_t first = std::min(len, buf.size() - start);
++  memcpy(out, &buf[start], first);
++  memcpy(out + first, &buf[0], len - first);
++  return len;
++}
++
++void ByteRing::discard(size_t len) {
++  len = std::min(len, count);
++  if (!len) {
++    return;
++  }
++  head = (head + len) & (buf.size() - 1);
++  count -= len;
++  if (!count) {
++    head = 0;
++    // Give back what a burst grew, but keep a small ring for the next one.
++    if (buf.size() > 65536) {
++      std::vector<uint8_t>().swap(buf);
++    }
++  }
++}
++
++size_t
++ByteRing::readv(const iovec* iov, int iovcnt, size_t skip, bool peekOnly) {
++  size_t done = 0;
++  for (int i = 0; i < iovcnt && done < count; i++) {
++    size_t len = iov[i].iov_len;
++    if (skip >= len) {
++      skip -= len;
++      continue;
++    }
++    done += peek((uint8_t*)iov[i].iov_base + skip, len - skip, done);
++    skip = 0;
++  }
++  if (!peekOnly) {
++    discard(done);
++  }
++  return done;
++}
++
++size_t
++ByteRing::writev(const iovec* iov, int iovcnt, size_t skip, size_t limit) {
++  size_t done = 0;
++  for (int i = 0; i < iovcnt && done < limit; i++) {
++    size_t len = iov[i].iov_len;
++    if (skip >= len) {
++      skip -= len;
++      continue;
++    }
++    size_t n = std::min(len - skip, limit - done);
++    push((const uint8_t*)iov[i].iov_base + skip, n);
++    skip = 0;
++    done += n;
++  }
++  return done;
++}
++
++ssize_t iovecLength(const iovec* iov, int iovcnt) {
++  if (iovcnt < 0 || iovcnt > IOV_MAX) {
++    return -EINVAL;
++  }
++  size_t total = 0;
++  for (int i = 0; i < iovcnt; i++) {
++    if (!iov[i].iov_base && iov[i].iov_len) {
++      return -EFAULT;
++    }
++    if (iov[i].iov_len > SSIZE_MAX - total) {
++      return -EINVAL;
++    }
++    total += iov[i].iov_len;
++  }
++  return total;
++}
++
++// StreamFile
++
++void StreamFile::addListener(Listener* listener) {
++  std::lock_guard<std::mutex> lock(listenersMutex);
++  listener->prev = last;
++  listener->next = nullptr;
++  if (last) {
++    last->next = listener;
++  } else {
++    first = listener;
++  }
++  last = listener;
++}
++
++void StreamFile::removeListener(Listener* listener) {
++  std::lock_guard<std::mutex> lock(listenersMutex);
++  if (listener->prev) {
++    listener->prev->next = listener->next;
++  } else if (first == listener) {
++    first = listener->next;
++  } else {
++    // Not registered here.
++    return;
++  }
++  if (listener->next) {
++    listener->next->prev = listener->prev;
++  } else {
++    last = listener->prev;
++  }
++  listener->prev = listener->next = nullptr;
++}
++
++void StreamFile::notify(uint32_t events) {
++  constexpr uint32_t always = EPOLLERR | EPOLLHUP | StreamClosedEvent;
++  std::lock_guard<std::mutex> lock(listenersMutex);
++  bool exclusiveTaken = false;
++  for (Listener* l = first; l;) {
++    Listener* next = l->next;
++    if (events & (l->interest | always)) {
++      if (!l->exclusive || (events & StreamClosedEvent)) {
++        l->notify(events);
++      } else if (!exclusiveTaken && l->notify(events)) {
++        exclusiveTaken = true;
++        // Rotate it to the back so the next notification wakes another.
++        if (l != last) {
++          if (l->prev) {
++            l->prev->next = l->next;
++          } else {
++            first = l->next;
++          }
++          l->next->prev = l->prev;
++          l->prev = last;
++          l->next = nullptr;
++          last->next = l;
++          last = l;
++        }
++      }
++    }
++    l = next;
++  }
++}
++
++void StreamFile::closeAndNotify() {
++  closed.store(true);
++  notify(StreamClosedEvent | AllEvents);
++}
++
++ssize_t StreamFile::read(uint8_t* buf, size_t len, off_t offset) {
++  iovec iov = {buf, len};
++  return readv(&iov, 1, MSG_DONTWAIT);
++}
++
++ssize_t StreamFile::write(const uint8_t* buf, size_t len, off_t offset) {
++  iovec iov = {(void*)buf, len};
++  return writev(&iov, 1, MSG_DONTWAIT);
++}
++
++int addStreamDescriptor(std::shared_ptr<StreamFile> file, oflags_t flags) {
++  std::shared_ptr<OpenFileState> openFile;
++  if (int err = OpenFileState::create(file, flags, openFile)) {
++    return err;
++  }
++  int fd = wasmFS.getFileTable().locked().addEntry(openFile);
++  if (fd < 0) {
++    // The table is full. Undo the open() OpenFileState::create did.
++    (void)file->locked().close();
++    return -EMFILE;
++  }
++  return fd;
++}
++
++// Blocking
++
++void Wakeup::signal() {
++  word.store(1);
++#ifdef __EMSCRIPTEN_PTHREADS__
++  emscripten_futex_wake(&word, 1);
++#endif
++}
++
++class Blocker::Node : public Listener {
++public:
++  std::shared_ptr<StreamFile> file;
++  Wakeup* wakeup;
++
++  bool notify(uint32_t events) override {
++    wakeup->signal();
++    return true;
++  }
++};
++
++Blocker::Blocker(int timeoutMs, Kind kind)
++  : deadline(timeoutMs < 0 ? INFINITY : emscripten_get_now() + timeoutMs),
++    signalsAtStart(_emscripten_signals_handled(kind == Restartable)),
++    interruptingOnly(kind == Restartable) {}
++
++Blocker::~Blocker() {
++  for (auto& node : nodes) {
++    node->file->removeListener(node.get());
++  }
++}
++
++void Blocker::watch(std::shared_ptr<StreamFile> file, uint32_t events) {
++  auto node = std::make_unique<Node>();
++  node->file = std::move(file);
++  node->wakeup = &wakeup;
++  node->interest = events;
++  node->file->addListener(node.get());
++  nodes.push_back(std::move(node));
++}
++
++int Blocker::wait() {
++#ifdef __EMSCRIPTEN_PTHREADS__
++  // Run what pthread_kill() proxied to this thread: that is where signal
++  // handlers run.
++  emscripten_current_thread_process_queued_calls();
++  if (_emscripten_signals_handled(interruptingOnly) != signalsAtStart) {
++    return -EINTR;
++  }
++  double timeout = INFINITY;
++  if (deadline != INFINITY) {
++    timeout = deadline - emscripten_get_now();
++    if (timeout <= 0) {
++      return -ETIMEDOUT;
++    }
++  }
++  // Nothing on this path may be unwound by a cancellation: the listeners
++  // registered on other files point into this frame.
++  int cancelState;
++  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancelState);
++  // Any return (woken, timed out, or -EINTR when pthread_kill or another
++  // proxied call pokes this thread) goes back to the caller's re-check; the
++  // next wait() sees a signal or a passed deadline.
++  emscripten_futex_wait(&wakeup.word, 0, timeout);
++  pthread_setcancelstate(cancelState, nullptr);
++  return 0;
++#else
++  // canBlock() is false without pthreads; nothing waits.
++  return -ETIMEDOUT;
++#endif
++}
++
++bool Blocker::canBlock() {
++#ifdef __EMSCRIPTEN_PTHREADS__
++  // The main browser thread cannot Atomics.wait (emscripten would spin it),
++  // and must not stall on a peer anyway.
++  return !emscripten_is_main_browser_thread();
++#else
++  return false;
++#endif
++}
++
++} // namespace wasmfs
+diff --git a/system/lib/wasmfs/stream_file.h b/system/lib/wasmfs/stream_file.h
+new file mode 100644
+index 0000000..0544051
+--- /dev/null
++++ b/system/lib/wasmfs/stream_file.h
+@@ -0,0 +1,276 @@
++// Copyright 2026 The Emscripten Authors.  All rights reserved.
++// Emscripten is available under two separate licenses, the MIT license and the
++// University of Illinois/NCSA Open Source License.  Both these licenses can be
++// found in the LICENSE file.
++
++// Stream files: pipes, sockets, eventfds and epoll instances.
++//
++// A StreamFile is read, written and polled by the syscall layer without the
++// File lock or the OpenFileState lock held, so a read can block while another
++// thread writes to the same file, polls it or closes it. Each stream file keeps
++// its own state lock and a list of Listeners (threads blocked in it, and epoll
++// registrations) that it notifies when its readiness may have changed.
++//
++// Lock order (a thread holding one of these may only take ones further down):
++//   1. FileTable lock, then OpenFileState lock: held only to find a file.
++//   2. File lock (file.h): close(), fstat and ioctl hold it around a stream
++//      file's close() and getSize().
++//   3. EpollFile::mutex: an epoll instance's interest set. An epoll that
++//      watches another takes its own before the watched one's; nesting is
++//      acyclic (epoll_ctl refuses loops with ELOOP).
++//   4. A stream file's state lock (its buffers and flags).
++//   5. StreamFile::listenersMutex. A notification runs the listeners with it
++//      held, and an epoll registration then notifies its epoll's own
++//      listeners: a watched file's lock before its watcher's.
++//   6. EpollFile::readyMutex: the ready list.
++// Nothing blocks or calls JS while holding any of them, and a stream file's
++// readv/writev/poll run with none of 1-2 held.
++//
++// Stream files are not reachable by path, so each has exactly one
++// OpenFileState, and close() runs exactly when its last descriptor goes away.
++
++#pragma once
++
++#include <atomic>
++#include <memory>
++#include <mutex>
++#include <poll.h>
++#include <stdint.h>
++#include <sys/epoll.h>
++#include <sys/socket.h>
++#include <sys/uio.h>
++#include <vector>
++
++#include "file.h"
++
++namespace wasmfs {
++
++class EpollFile;
++class SocketFile;
++
++// Readiness is reported in EPOLL* bits. musl gives the POLL* bits the same
++// values (EPOLLIN == POLLIN, EPOLLRDHUP == POLLRDHUP, ...).
++//
++// Only passed to notify(): the file's last descriptor closed. Every listener
++// hears it, whatever its interest.
++constexpr uint32_t StreamClosedEvent = POLLNVAL;
++
++// Readiness masks producers pass to notify().
++constexpr uint32_t ReadableEvents = EPOLLIN | EPOLLRDNORM;
++constexpr uint32_t WritableEvents = EPOLLOUT | EPOLLWRNORM;
++constexpr uint32_t AllEvents = ReadableEvents | WritableEvents | EPOLLRDHUP |
++                               EPOLLHUP | EPOLLERR;
++
++// Something that wants to hear when a StreamFile's readiness may have changed.
++class Listener {
++public:
++  virtual ~Listener() = default;
++
++  // Runs with the notifying file's listener lock held: it must not block, and
++  // may only take locks that order after it (see the lock order above).
++  // Returns whether the event was taken, which only matters for exclusive
++  // listeners.
++  virtual bool notify(uint32_t events) = 0;
++
++  // The events to deliver; EPOLLERR, EPOLLHUP and StreamClosedEvent always
++  // are. Fixed while the listener is registered.
++  uint32_t interest = 0;
++
++  // EPOLLEXCLUSIVE: of a file's exclusive listeners, each notification goes
++  // to the first one that takes it, which then moves to the back of the list.
++  bool exclusive = false;
++
++private:
++  friend class StreamFile;
++  Listener* prev = nullptr;
++  Listener* next = nullptr;
++};
++
++// A FIFO of bytes in a power-of-two ring that grows as needed. Not
++// thread-safe: owners guard it with their state lock.
++class ByteRing {
++  std::vector<uint8_t> buf;
++  size_t head = 0;
++  size_t count = 0;
++
++  void reserve(size_t need);
++
++public:
++  size_t size() const { return count; }
++  bool empty() const { return count == 0; }
++  void clear();
++  void push(const uint8_t* data, size_t len);
++  // Copies up to `len` bytes starting `skip` bytes in, without consuming.
++  size_t peek(uint8_t* out, size_t len, size_t skip = 0) const;
++  void discard(size_t len);
++  size_t pop(uint8_t* out, size_t len) {
++    size_t n = peek(out, len);
++    discard(n);
++    return n;
++  }
++  // Fills the iovecs, after skipping their first `skip` bytes, from the front
++  // of the ring; consumes unless `peek`.
++  size_t readv(const iovec* iov, int iovcnt, size_t skip, bool peek);
++  // Appends at most `limit` bytes taken from the iovecs after skipping the
++  // first `skip` bytes of them.
++  size_t writev(const iovec* iov, int iovcnt, size_t skip, size_t limit);
++};
++
++// The total length of the iovecs, or a negative errno.
++ssize_t iovecLength(const iovec* iov, int iovcnt);
++
++class StreamFile : public DataFile {
++public:
++  StreamFile(mode_t mode, mode_t fileType)
++    : DataFile(mode, NullBackend, fileType) {
++    seekable = false;
++  }
++
++  StreamFile* asStream() override { return this; }
++  virtual SocketFile* asSocket() { return nullptr; }
++  virtual EpollFile* asEpoll() { return nullptr; }
++
++  // The readiness of this end now, in EPOLL* bits (a pipe's read end never
++  // reports EPOLLOUT). Called with no lock held, or from an epoll instance
++  // holding its own mutex.
++  virtual uint32_t poll() = 0;
++
++  // Scatter read and gather write. `flags` are MSG_* bits; the syscall layer
++  // adds MSG_DONTWAIT for O_NONBLOCK descriptors. They return a byte count or
++  // a negative errno and block (see Blocker) unless MSG_DONTWAIT is set.
++  virtual ssize_t readv(const iovec* iov, int iovcnt, int flags) = 0;
++  virtual ssize_t writev(const iovec* iov, int iovcnt, int flags) = 0;
++
++  // True once close() ran. A blocked reader or writer then fails with EBADF.
++  bool isClosed() const { return closed.load(); }
++
++  void addListener(Listener* listener);
++  void removeListener(Listener* listener);
++
++  // Tells the listeners interested in `events` that this file may be ready.
++  // Producers call it after the state change; with or without their state
++  // lock held.
++  void notify(uint32_t events);
++
++  std::shared_ptr<StreamFile> sharedStream() {
++    return std::static_pointer_cast<StreamFile>(shared_from_this());
++  }
++
++protected:
++  // For close(): marks the file closed and wakes every listener.
++  void closeAndNotify();
++
++  // The DataFile interface, for callers that bypass the stream path. Never
++  // blocks.
++  ssize_t read(uint8_t* buf, size_t len, off_t offset) override;
++  ssize_t write(const uint8_t* buf, size_t len, off_t offset) override;
++  int setSize(off_t size) override { return -EINVAL; }
++  int flush() override { return 0; }
++
++private:
++  std::atomic<bool> closed{false};
++  std::mutex listenersMutex;
++  Listener* first = nullptr;
++  Listener* last = nullptr;
++};
++
++// A word a blocked thread sleeps on.
++struct Wakeup {
++  std::atomic<uint32_t> word{0};
++  void signal();
++};
++
++// Blocks the calling thread in a stream syscall until a watched file notifies
++// it, a timeout passes, or a signal handler runs on the thread:
++//
++//   Blocker blocker(timeoutMs, Blocker::Restartable);
++//   blocker.watch(file, EPOLLIN);
++//   while (true) {
++//     blocker.arm();
++//     if (<condition holds>) break;
++//     if (int err = blocker.wait()) return err;  // -EINTR or -ETIMEDOUT
++//   }
++//
++// arm() comes before the condition check so a notification between the check
++// and the sleep is not lost. The caller holds no WasmFS lock across wait().
++//
++// Signals: pthread_kill() proxies raise() to the target's system queue and
++// wakes it (pthread_kill.c). wait() runs that queue, and fails with -EINTR if
++// a handler has run on this thread since the Blocker was made (libc counts
++// them in raise.c). A Restartable syscall (read, write, connect: the ones
++// Linux restarts under SA_RESTART) only counts handlers without SA_RESTART;
++// an Interruptible one (poll, epoll_wait) counts every handler. Handlers must
++// return normally. Blocked stream I/O is not a pthread cancellation point.
++//
++// The main browser thread cannot block (it cannot Atomics.wait); there, and
++// in builds without pthreads, every descriptor behaves as if O_NONBLOCK were
++// set and timeouts are zero. See canBlock().
++class Blocker {
++public:
++  enum Kind { Restartable, Interruptible };
++
++  // timeoutMs < 0 waits indefinitely.
++  Blocker(int timeoutMs, Kind kind);
++  ~Blocker();
++  Blocker(const Blocker&) = delete;
++  Blocker& operator=(const Blocker&) = delete;
++
++  // Registers for notifications from `file` until the Blocker goes away.
++  void watch(std::shared_ptr<StreamFile> file, uint32_t events);
++
++  void arm() { wakeup.word.store(0); }
++
++  // Sleeps until notified. Returns 0 to re-check the condition, -EINTR, or
++  // -ETIMEDOUT once the deadline has passed.
++  int wait();
++
++  // Whether this thread may block at all.
++  static bool canBlock();
++
++private:
++  class Node;
++  Wakeup wakeup;
++  std::vector<std::unique_ptr<Node>> nodes;
++  // Unused without pthreads, where nothing blocks.
++  [[maybe_unused]] double deadline;
++  [[maybe_unused]] unsigned int signalsAtStart;
++  [[maybe_unused]] bool interruptingOnly;
++};
++
++// Opens `file` with these flags (O_RDONLY etc., O_NONBLOCK) and gives it the
++// lowest free descriptor. Returns the descriptor or a negative errno.
++int addStreamDescriptor(std::shared_ptr<StreamFile> file, oflags_t flags);
++
++// Runs attempt() until it returns something other than -EAGAIN, blocking on
++// `file` for `events` in between unless `flags` has MSG_DONTWAIT or this
++// thread cannot block. A timeout ends it with -EAGAIN.
++template<typename Attempt>
++ssize_t blockUntil(StreamFile* file,
++                   uint32_t events,
++                   int flags,
++                   int timeoutMs,
++                   Blocker::Kind kind,
++                   Attempt attempt) {
++  ssize_t result = attempt();
++  if (result != -EAGAIN || (flags & MSG_DONTWAIT) || !Blocker::canBlock()) {
++    return result;
++  }
++  Blocker blocker(timeoutMs, kind);
++  blocker.watch(file->sharedStream(), events);
++  while (true) {
++    blocker.arm();
++    result = attempt();
++    if (result != -EAGAIN) {
++      return result;
++    }
++    int err = blocker.wait();
++    if (err == -ETIMEDOUT) {
++      return -EAGAIN;
++    }
++    if (err) {
++      return err;
++    }
++  }
++}
++
++} // namespace wasmfs
+diff --git a/system/lib/wasmfs/syscalls.cpp b/system/lib/wasmfs/syscalls.cpp
+index 3b70211..73857fa 100755
+--- a/system/lib/wasmfs/syscalls.cpp
++++ b/system/lib/wasmfs/syscalls.cpp
+@@ -7,18 +7,22 @@
+ 
+ #define _LARGEFILE64_SOURCE // For F_GETLK64 etc
+ 
++#include <cstddef>
+ #include <dirent.h>
+ #include <emscripten/emscripten.h>
+ #include <emscripten/heap.h>
+ #include <emscripten/html5.h>
+ #include <emscripten/syscalls.h>
+ #include <errno.h>
++#include <limits.h>
+ #include <mutex>
++#include <net/if.h>
+ #include <poll.h>
+ #include <stdarg.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/statfs.h>
+ #include <unistd.h>
+@@ -31,7 +35,9 @@
+ #include "file_table.h"
+ #include "paths.h"
+ #include "pipe_backend.h"
++#include "socket_file.h"
+ #include "special_files.h"
++#include "stream_file.h"
+ #include "wasmfs.h"
+ 
+ // File permission macros for wasmfs.
+@@ -57,18 +63,25 @@ int __syscall_dup3(int oldfd, int newfd, int flags) {
+     return -EINVAL;
+   }
+ 
+-  auto fileTable = wasmFS.getFileTable().locked();
+-  auto oldOpenFile = fileTable.getEntry(oldfd);
+-  if (!oldOpenFile) {
+-    return -EBADF;
++  std::shared_ptr<DataFile> closee;
++  {
++    auto fileTable = wasmFS.getFileTable().locked();
++    auto oldOpenFile = fileTable.getEntry(oldfd);
++    if (!oldOpenFile) {
++      return -EBADF;
++    }
++    if (newfd < 0 || newfd >= WASMFS_FD_MAX) {
++      return -EBADF;
++    }
++
++    // If newfd was open it is closed, silently, as by close(): when this was
++    // the last descriptor of its open file, the file is closed below, outside
++    // the table lock. (A socket the JDK dup2()s over must really close.)
++    closee = fileTable.setEntry(newfd, oldOpenFile);
+   }
+-  if (newfd < 0 || newfd >= WASMFS_FD_MAX) {
+-    return -EBADF;
++  if (closee) {
++    (void)closee->locked().close();
+   }
+-
+-  // If the file descriptor newfd was previously open, it will just be
+-  // overwritten silently.
+-  (void)fileTable.setEntry(newfd, oldOpenFile);
+   return newfd;
+ }
+ 
+@@ -87,6 +100,32 @@ int __syscall_dup(int fd) {
+ // state or provided by argument in the case of pread or pwrite.
+ enum class OffsetHandling { OpenFileState, Argument };
+ 
++static_assert(sizeof(__wasi_iovec_t) == sizeof(iovec) &&
++                offsetof(__wasi_iovec_t, buf_len) == offsetof(iovec, iov_len),
++              "WASI and POSIX iovecs must share a layout");
++
++// Reads and writes of stream files (pipes, sockets, eventfds; stream_file.h)
++// run without the OpenFileState and File locks, which the caller has just
++// dropped: they may block while another thread writes to or closes the file.
++static __wasi_errno_t streamIo(StreamFile* stream,
++                               bool isWrite,
++                               oflags_t flags,
++                               const void* iovs,
++                               size_t iovs_len,
++                               __wasi_size_t* n) {
++  int iovcnt = iovs_len > IOV_MAX ? IOV_MAX + 1 : (int)iovs_len;
++  int msgFlags = (flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
++  ssize_t result = isWrite
++                     ? stream->writev((const iovec*)iovs, iovcnt, msgFlags)
++                     : stream->readv((const iovec*)iovs, iovcnt, msgFlags);
++  if (result < 0) {
++    // Translate to WASI standard of positive return codes.
++    return -result;
++  }
++  *n = result;
++  return __WASI_ERRNO_SUCCESS;
++}
++
+ // Internal write function called by __wasi_fd_write and __wasi_fd_pwrite
+ // Receives an open file state offset.
+ // Optionally sets open file state offset.
+@@ -117,6 +156,15 @@ static __wasi_errno_t writeAtOffset(OffsetHandling setOffset,
+     return __WASI_ERRNO_BADF;
+   }
+ 
++  if (auto* stream = file->asStream()) {
++    if (setOffset == OffsetHandling::Argument) {
++      return __WASI_ERRNO_SPIPE;
++    }
++    oflags_t flags = lockedOpenFile.getFlags();
++    lockedOpenFile.unlock();
++    return streamIo(stream, true, flags, iovs, iovs_len, nwritten);
++  }
++
+   auto lockedFile = file->locked();
+ 
+   if (setOffset == OffsetHandling::OpenFileState) {
+@@ -214,6 +262,15 @@ static __wasi_errno_t readAtOffset(OffsetHandling setOffset,
+     return __WASI_ERRNO_BADF;
+   }
+ 
++  if (auto* stream = file->asStream()) {
++    if (setOffset == OffsetHandling::Argument) {
++      return __WASI_ERRNO_SPIPE;
++    }
++    oflags_t flags = lockedOpenFile.getFlags();
++    lockedOpenFile.unlock();
++    return streamIo(stream, false, flags, iovs, iovs_len, nread);
++  }
++
+   auto lockedFile = file->locked();
+ 
+   size_t bytesRead = 0;
+@@ -1336,6 +1393,31 @@ int __syscall_ioctl(int fd, int request, ...) {
+   auto openHandle = openFile->locked();
+   auto file = openHandle.getFile();
+ 
++  if (request == FIONBIO) {
++    if (!argp) {
++      return -EFAULT;
++    }
++    auto flags = openHandle.getFlags();
++    openHandle.setFlags(*static_cast<int*>(argp) ? (flags | O_NONBLOCK)
++                                                 : (flags & ~O_NONBLOCK));
++    return 0;
++  }
++
++  // A browser has no network interfaces to list (the JDK's NetworkInterface
++  // asks for them).
++  if (request == SIOCGIFCONF) {
++    auto dataFile = file->dynCast<DataFile>();
++    StreamFile* stream = dataFile ? dataFile->asStream() : nullptr;
++    if (stream && stream->asSocket()) {
++      if (!argp) {
++        return -EFAULT;
++      }
++      static_cast<struct ifconf*>(argp)->ifc_len = 0;
++      return 0;
++    }
++  }
++
++  // For a stream file getSize() is what a read would return now.
+   if (request == FIONREAD) {
+     off_t size = file->locked().getSize();
+     if (size < 0) {
+@@ -1372,85 +1454,150 @@ int __syscall_ioctl(int fd, int request, ...) {
+   }
+ }
+ 
++// Gives the two files of a pipe or socketpair descriptors, or none.
++static int addDescriptorPair(std::shared_ptr<StreamFile> a,
++                             oflags_t aFlags,
++                             std::shared_ptr<StreamFile> b,
++                             oflags_t bFlags,
++                             int fd[2]) {
++  int fdA = addStreamDescriptor(a, aFlags);
++  if (fdA < 0) {
++    return fdA;
++  }
++  int fdB = addStreamDescriptor(b, bFlags);
++  if (fdB < 0) {
++    (void)__wasi_fd_close(fdA);
++    return fdB;
++  }
++  fd[0] = fdA;
++  fd[1] = fdB;
++  return 0;
++}
++
+ int __syscall_pipe2(int fd[2], int flags) {
+-  auto* fds = (__wasi_fd_t*)fd;
+-  if (flags && flags != O_CLOEXEC) {
+-    return -ENOTSUP;
++  if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
++    return -EINVAL;
+   }
+ 
+   // Make a pipe: Two PipeFiles that share a single data source between them, so
+   // that writing to one can be read in the other.
+-  //
+-  // No backend is needed here, so pass in nullptr for that.
+   auto data = std::make_shared<PipeData>();
+-  auto reader = std::make_shared<PipeFile>(S_IRUGO, data);
+-  auto writer = std::make_shared<PipeFile>(S_IWUGO, data);
+-
+-  std::shared_ptr<OpenFileState> openReader, openWriter;
+-  (void)OpenFileState::create(reader, O_RDONLY, openReader);
+-  (void)OpenFileState::create(writer, O_WRONLY, openWriter);
+-
+-  auto fileTable = wasmFS.getFileTable().locked();
+-  fds[0] = fileTable.addEntry(openReader);
+-  fds[1] = fileTable.addEntry(openWriter);
+-
+-  return 0;
+-}
+-
+-int __syscall_poll(struct pollfd* fds, nfds_t nfds, int timeout) {
+-  auto fileTable = wasmFS.getFileTable().locked();
+-
+-  // Process the list of FDs and compute their revents masks. Count the number
+-  // of nonzero such masks, which is our return value.
+-  int nonzero = 0;
+-  for (nfds_t i = 0; i < nfds; i++) {
+-    auto* pollfd = &fds[i];
+-    auto fd = pollfd->fd;
+-    if (fd < 0) {
+-      // Negative FDs are ignored in poll().
+-      pollfd->revents = 0;
+-      continue;
++  auto reader = std::make_shared<PipeFile>(S_IRUGO, data, true);
++  auto writer = std::make_shared<PipeFile>(S_IWUGO, data, false);
++  data->readEnd = reader;
++  data->writeEnd = writer;
++
++  oflags_t nonblock = flags & O_NONBLOCK;
++  return addDescriptorPair(
++    reader, O_RDONLY | nonblock, writer, O_WRONLY | nonblock, fd);
++}
++
++// poll(): readiness comes from each stream file's poll(); regular files keep
++// their old rule (writable if open for writing, readable if non-empty). With
++// nothing ready it blocks until a stream file notifies, the timeout passes, or
++// a signal handler runs (-EINTR). On the main browser thread the timeout is
++// treated as zero; see Blocker.
++static int doPoll(struct pollfd* fds, nfds_t nfds, int timeout) {
++  if (nfds && !fds) {
++    return -EFAULT;
++  }
++  struct Polled {
++    std::shared_ptr<OpenFileState> openFile;
++    std::shared_ptr<File> file;
++    StreamFile* stream = nullptr;
++    oflags_t accessMode = 0;
++  };
++  std::vector<Polled> polled(nfds);
++  {
++    auto fileTable = wasmFS.getFileTable().locked();
++    for (nfds_t i = 0; i < nfds; i++) {
++      if (fds[i].fd >= 0) {
++        polled[i].openFile = fileTable.getEntry(fds[i].fd);
++      }
+     }
+-    // Assume invalid, unless there is an open file.
+-    auto mask = POLLNVAL;
+-    auto openFile = fileTable.getEntry(fd);
+-    if (openFile) {
+-      mask = 0;
+-      auto flags = openFile->locked().getFlags();
+-      auto accessMode = flags & O_ACCMODE;
+-      auto readBit = pollfd->events & POLLOUT;
+-      if (readBit && (accessMode == O_WRONLY || accessMode == O_RDWR)) {
+-        mask |= readBit;
++  }
++  for (auto& p : polled) {
++    if (p.openFile) {
++      auto locked = p.openFile->locked();
++      p.file = locked.getFile();
++      p.accessMode = locked.getFlags() & O_ACCMODE;
++      if (auto dataFile = p.file->dynCast<DataFile>()) {
++        p.stream = dataFile->asStream();
+       }
+-      auto writeBit = pollfd->events & POLLIN;
+-      if (writeBit && (accessMode == O_RDONLY || accessMode == O_RDWR)) {
+-        // If there is data in the file, then there is also the ability to read.
+-        // TODO: Does this need to consider the position as well? That is, if
+-        // the position is at the end, we can't read from the current position
+-        // at least. If we update this, make sure the size isn't an error!
+-        if (openFile->locked().getFile()->locked().getSize() > 0) {
+-          mask |= writeBit;
++    }
++  }
++
++  // Computes every revents mask; returns how many are nonzero.
++  auto scan = [&]() {
++    int nonzero = 0;
++    for (nfds_t i = 0; i < nfds; i++) {
++      auto* pollfd = &fds[i];
++      auto& p = polled[i];
++      uint32_t mask = 0;
++      if (pollfd->fd < 0) {
++        // Negative FDs are ignored in poll().
++      } else if (!p.openFile) {
++        mask = POLLNVAL;
++      } else if (p.stream) {
++        mask = p.stream->isClosed()
++                 ? POLLNVAL
++                 : p.stream->poll() &
++                     ((uint16_t)pollfd->events | POLLERR | POLLHUP);
++      } else {
++        if ((pollfd->events & POLLOUT) &&
++            (p.accessMode == O_WRONLY || p.accessMode == O_RDWR)) {
++          mask |= POLLOUT;
+         }
++        // If there is data in the file, then there is also the ability to
++        // read. TODO: Does this need to consider the position as well?
++        if ((pollfd->events & POLLIN) &&
++            (p.accessMode == O_RDONLY || p.accessMode == O_RDWR) &&
++            p.file->locked().getSize() > 0) {
++          mask |= POLLIN;
++        }
++      }
++      pollfd->revents = mask;
++      if (mask) {
++        nonzero++;
+       }
+-      // TODO: get mask from File dynamically using a poll() hook?
+     }
+-    // TODO: set the state based on the state of the other end of the pipe, for
+-    //       pipes (POLLERR | POLLHUP)
+-    if (mask) {
+-      nonzero++;
++    return nonzero;
++  };
++
++  int ready = scan();
++  if (ready || timeout == 0 || !Blocker::canBlock()) {
++    return ready;
++  }
++  Blocker blocker(timeout, Blocker::Interruptible);
++  for (nfds_t i = 0; i < nfds; i++) {
++    if (fds[i].fd >= 0 && polled[i].stream) {
++      blocker.watch(polled[i].stream->sharedStream(),
++                    (uint16_t)fds[i].events | POLLERR | POLLHUP);
++    }
++  }
++  while (true) {
++    blocker.arm();
++    ready = scan();
++    if (ready) {
++      return ready;
++    }
++    int err = blocker.wait();
++    if (err == -ETIMEDOUT) {
++      return 0;
++    }
++    if (err) {
++      return err;
+     }
+-    pollfd->revents = mask;
+   }
+-  // TODO: This should block based on the timeout. The old FS did not do so due
+-  //       to web limitations, which we should perhaps revisit (especially with
+-  //       pthreads and asyncify).
+-  return nonzero;
+ }
+ 
+-// libc routes zero-timeout poll() calls here (see musl's poll.c). WasmFS's
+-// __syscall_poll never blocks, so the zero-timeout probe is the same call.
++int __syscall_poll(struct pollfd* fds, nfds_t nfds, int timeout) {
++  return doPoll(fds, nfds, timeout);
++}
++
++// libc routes zero-timeout poll() calls here (see musl's poll.c).
+ int __syscall_poll_nonblocking(struct pollfd* fds, nfds_t nfds) {
+-  return __syscall_poll(fds, nfds, 0);
++  return doPoll(fds, nfds, 0);
+ }
+ 
+ int __syscall_fallocate(int fd, int mode, off_t offset, off_t len) {
+@@ -1730,7 +1877,66 @@ int _munmap_js(
+   return _msync_js(addr, length, prot, flags, fd, offset);
+ }
+ 
+-// Stubs (at least for now)
++// Sockets. AF_INET/AF_INET6 sockets come from socket(), in inet_socket.cpp,
++// which is only linked when socket() is; socketpair() is here because libc's
++// emscripten_syscall_stubs.c has a weak stub for it that a definition linked
++// on demand could lose to.
++
++} // extern "C"
++
++namespace {
++
++// The socket behind a descriptor, kept alive while in use.
++struct SocketRef {
++  std::shared_ptr<DataFile> holder;
++  SocketFile* socket = nullptr;
++  int dontWait = 0; // MSG_DONTWAIT if the descriptor is O_NONBLOCK
++  int error = 0;
++};
++
++SocketRef getSocket(int fd) {
++  SocketRef ref;
++  auto openFile = wasmFS.getFileTable().locked().getEntry(fd);
++  if (!openFile) {
++    ref.error = -EBADF;
++    return ref;
++  }
++  auto locked = openFile->locked();
++  ref.holder = locked.getFile()->dynCast<DataFile>();
++  StreamFile* stream = ref.holder ? ref.holder->asStream() : nullptr;
++  ref.socket = stream ? stream->asSocket() : nullptr;
++  if (!ref.socket) {
++    ref.error = -ENOTSOCK;
++    return ref;
++  }
++  ref.dontWait = (locked.getFlags() & O_NONBLOCK) ? MSG_DONTWAIT : 0;
++  return ref;
++}
++
++} // anonymous namespace
++
++extern "C" {
++
++int __syscall_socketpair(
++  int domain, int type, int protocol, int fd[2], int unused1, int unused2) {
++  if (domain != AF_UNIX) {
++    return -EOPNOTSUPP;
++  }
++  if (!fd) {
++    return -EFAULT;
++  }
++  int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
++  type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
++  if (protocol && protocol != PF_UNIX) {
++    return -EPROTONOSUPPORT;
++  }
++  std::shared_ptr<SocketFile> ends[2];
++  if (int err = createSocketPair(type, ends)) {
++    return err;
++  }
++  oflags_t oflags = O_RDWR | ((flags & SOCK_NONBLOCK) ? O_NONBLOCK : 0);
++  return addDescriptorPair(ends[0], oflags, ends[1], oflags, fd);
++}
+ 
+ int __syscall_accept4(int sockfd,
+                       struct sockaddr* addr,
+@@ -1738,7 +1944,9 @@ int __syscall_accept4(int sockfd,
+                       int flags,
+                       int unused1,
+                       int unused2) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  // There are no inbound connections in a browser.
++  return ref.error ? ref.error : -EOPNOTSUPP;
+ }
+ 
+ int __syscall_bind(int sockfd,
+@@ -1747,7 +1955,8 @@ int __syscall_bind(int sockfd,
+                    int unused1,
+                    int unused2,
+                    int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error : ref.socket->bind(addr, len);
+ }
+ 
+ int __syscall_connect(int sockfd,
+@@ -1756,17 +1965,15 @@ int __syscall_connect(int sockfd,
+                       int unused1,
+                       int unused2,
+                       int unused3) {
+-  return -ENOSYS;
+-}
+-
+-int __syscall_socket(
+-  int domain, int type, int protocol, int unused1, int unused2, int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error
++                   : ref.socket->connect(addr, len, ref.dontWait != 0);
+ }
+ 
+ int __syscall_listen(
+   int sockfd, int backlog, int unused1, int unused2, int unused3, int unused4) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error : ref.socket->listen(backlog);
+ }
+ 
+ int __syscall_getsockopt(int sockfd,
+@@ -1775,7 +1982,9 @@ int __syscall_getsockopt(int sockfd,
+                          void* optval,
+                          socklen_t* optlen,
+                          int unused) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error
++                   : ref.socket->getsockopt(level, optname, optval, optlen);
+ }
+ 
+ int __syscall_setsockopt(int sockfd,
+@@ -1784,7 +1993,9 @@ int __syscall_setsockopt(int sockfd,
+                          const void* optval,
+                          socklen_t optlen,
+                          int unused) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error
++                   : ref.socket->setsockopt(level, optname, optval, optlen);
+ }
+ 
+ int __syscall_shutdown(int sockfd,
+@@ -1793,7 +2004,8 @@ int __syscall_shutdown(int sockfd,
+                        int unused2,
+                        int unused3,
+                        int unused4) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error : ref.socket->shutdown(how);
+ }
+ 
+ int __syscall_getsockname(int sockfd,
+@@ -1802,7 +2014,8 @@ int __syscall_getsockname(int sockfd,
+                           int unused1,
+                           int unused2,
+                           int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error : ref.socket->getsockname(addr, len);
+ }
+ 
+ int __syscall_getpeername(int sockfd,
+@@ -1811,16 +2024,25 @@ int __syscall_getpeername(int sockfd,
+                           int unused1,
+                           int unused2,
+                           int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  return ref.error ? ref.error : ref.socket->getpeername(addr, len);
+ }
+ 
++// A stream socket ignores a destination, and reports no source: Linux sets
++// the address length to 0. There is no SIGPIPE, so MSG_NOSIGNAL is moot.
++
+ int __syscall_sendto(int sockfd,
+                      const void* buf,
+                      size_t len,
+                      int flags,
+                      const struct sockaddr* addr,
+                      socklen_t alen) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  if (ref.error) {
++    return ref.error;
++  }
++  iovec iov = {(void*)buf, len};
++  return ref.socket->writev(&iov, 1, flags | ref.dontWait);
+ }
+ 
+ int __syscall_sendmsg(int sockfd,
+@@ -1829,7 +2051,14 @@ int __syscall_sendmsg(int sockfd,
+                       int unused1,
+                       int unused2,
+                       int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  if (ref.error) {
++    return ref.error;
++  }
++  if (!msg) {
++    return -EFAULT;
++  }
++  return ref.socket->writev(msg->msg_iov, msg->msg_iovlen, flags | ref.dontWait);
+ }
+ 
+ int __syscall_recvfrom(int sockfd,
+@@ -1838,7 +2067,16 @@ int __syscall_recvfrom(int sockfd,
+                        int flags,
+                        struct sockaddr* addr,
+                        socklen_t* alen) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  if (ref.error) {
++    return ref.error;
++  }
++  iovec iov = {buf, len};
++  ssize_t result = ref.socket->readv(&iov, 1, flags | ref.dontWait);
++  if (result >= 0 && addr && alen) {
++    *alen = 0;
++  }
++  return result;
+ }
+ 
+ int __syscall_recvmsg(int sockfd,
+@@ -1847,7 +2085,22 @@ int __syscall_recvmsg(int sockfd,
+                       int unused1,
+                       int unused2,
+                       int unused3) {
+-  return -ENOSYS;
++  auto ref = getSocket(sockfd);
++  if (ref.error) {
++    return ref.error;
++  }
++  if (!msg) {
++    return -EFAULT;
++  }
++  ssize_t result =
++    ref.socket->readv(msg->msg_iov, msg->msg_iovlen, flags | ref.dontWait);
++  if (result >= 0) {
++    // No source address, no ancillary data, nothing truncated.
++    msg->msg_namelen = 0;
++    msg->msg_controllen = 0;
++    msg->msg_flags = 0;
++  }
++  return result;
+ }
+ 
+ int __syscall_fadvise64(int fd, off_t offset, off_t len, int advice) {
+@@ -1855,20 +2108,6 @@ int __syscall_fadvise64(int fd, off_t offset, off_t len, int advice) {
+   return 0;
+ }
+ 
+-// epoll is implemented in the legacy (non-WASMFS) JS syscall layer only.
+-int __syscall_epoll_create1(int flags) { return -ENOSYS; }
+-
+-int __syscall_epoll_ctl(int epfd, int op, int fd, struct epoll_event* ev) {
+-  return -ENOSYS;
+-}
+-
+-int __syscall_epoll_pwait(int epfd,
+-                          struct epoll_event* ev,
+-                          int maxevents,
+-                          int timeout,
+-                          const sigset_t* sigmask,
+-                          size_t sigsetsize) {
+-  return -ENOSYS;
+-}
++// epoll and eventfd are in epoll.cpp and eventfd.cpp.
+ 
+ } // extern "C"
+diff --git a/tools/native_sigs.py b/tools/native_sigs.py
+index 0ba6aac..40ae2ba 100755
+--- a/tools/native_sigs.py
++++ b/tools/native_sigs.py
+@@ -421,6 +421,8 @@ native_sigs = {
+   '__syscall_connect': '__p____',
+   '__syscall_epoll_ctl': '____p',
+   '__syscall_epoll_pwait': '__p__pp',
++  '__syscall_epoll_pwait_nonblocking': '__p_',
++  '__syscall_eventfd2': '___',
+   '__syscall_faccessat': '__p__',
+   '__syscall_fchmodat2': '__p__',
+   '__syscall_fchownat': '__p___',
+diff --git a/tools/system_libs.py b/tools/system_libs.py
+index 5ead0ca..7d846a6 100755
+--- a/tools/system_libs.py
++++ b/tools/system_libs.py
+@@ -1338,7 +1338,7 @@ class libc(MuslInternalLibrary,
+ 
+     libc_files += files_in_path(
+         path='system/lib/libc/musl/src/linux',
+-        filenames=['getdents.c', 'gettid.c', 'utimes.c', 'statx.c', 'wait4.c', 'wait3.c', 'epoll.c'])
++        filenames=['getdents.c', 'gettid.c', 'utimes.c', 'statx.c', 'wait4.c', 'wait3.c', 'epoll.c', 'eventfd.c'])
+ 
+     libc_files += files_in_path(
+         path='system/lib/libc/musl/src/malloc',
+@@ -2082,8 +2082,14 @@ class libwasmfs(DebugLibrary, AsanInstrumentedLibrary, MTLibrary):
+                    'file_table.cpp',
+                    'js_api.cpp',
+                    'emscripten.cpp',
++                   'epoll.cpp',
++                   'eventfd.cpp',
++                   'inet_socket.cpp',
+                    'paths.cpp',
++                   'resolver.cpp',
++                   'socket_file.cpp',
+                    'special_files.cpp',
++                   'stream_file.cpp',
+                    'support.cpp',
+                    'syscalls.cpp',
+                    'wasmfs.cpp'])

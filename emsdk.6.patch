@@ -6,64 +6,83 @@ ikvmc assembly, which fetched and retained ikvmc_lwjgl3 (82.8 MB), jvmdowngrader
 getSize now uses Content-Length from a HEAD request (only without Content-Encoding) and caches it; a read
 still fetches the file. Anything else falls back to the old full fetch.
 
---- a/src/library_wasmfs_fetch.js	2026-09-29 17:55:55.105325718 -0700
-+++ b/src/library_wasmfs_fetch.js	2026-09-29 17:55:55.131215324 -0700
-@@ -9,22 +9,18 @@
-   // will fetch() the data from the network asynchronously. Otherwise, after
-   // that fetch it behaves just like JSFile (and it reuses the code from there).
+Ported to emscripten 6.0.2 (fna-6.0.2 c3ba013); paths are emscripten 6's src/lib/lib*.js.
+
+diff --git a/src/lib/libwasmfs_fetch.js b/src/lib/libwasmfs_fetch.js
+index 477a8eb..d9fe38f 100644
+--- a/src/lib/libwasmfs_fetch.js
++++ b/src/lib/libwasmfs_fetch.js
+@@ -6,6 +6,8 @@
  
+ addToLibrary({
+   $wasmFS$JSMemoryRanges: {},
++  // Sizes answered from a HEAD before any data was fetched (getSize below).
 +  $wasmFS$fetchSizes: {},
+ 
+   // Fetch backend: On first access of the file (either a read or a getSize), it
+   // will fetch() the data from the network asynchronously. Otherwise, after
+@@ -14,27 +16,29 @@ addToLibrary({
    _wasmfs_create_fetch_backend_js__deps: [
      '$wasmFS$backends',
-     '$wasmFS$JSMemoryFiles',
+     '$wasmFS$JSMemoryRanges',
 +    '$wasmFS$fetchSizes',
-     '_wasmfs_create_js_file_backend_js',
-     '_wasmfs_fetch_get_file_path',
+     '_wasmfs_fetch_get_file_url',
+     '_wasmfs_fetch_get_chunk_size',
    ],
    _wasmfs_create_fetch_backend_js: async function(backend) {
      // Get a promise that fetches the data and stores it in JS memory (if it has
      // not already been fetched).
--    async function getFile(file) {
--      if (wasmFS$JSMemoryFiles[file]) {
--        // The data is already here, so nothing to do before we continue on to
--        // the actual read below.
--        return Promise.resolve();
--      }
--      // This is the first time we want the file's data.
-+    function getUrl(file) {
-       var url = '';
-       var fileUrl_p = __wasmfs_fetch_get_file_path(file);
+-    async function getFileRange(file, offset, len) {
+-      var url = '';
++    function getFileUrl(file) {
+       var fileUrl_p = __wasmfs_fetch_get_file_url(file);
        var fileUrl = UTF8ToString(fileUrl_p);
-@@ -38,7 +34,16 @@
-         } catch (e) {
-         }
+       var isAbs = fileUrl.indexOf('://') !== -1;
+       if (isAbs) {
+-        url = fileUrl;
+-      } else {
+-        try {
+-          var u = new URL(fileUrl, self.location.origin);
+-          url = u.toString();
+-        } catch (_e) {
+-          throw {status: 404};
+-        }
++        return fileUrl;
        }
--      var response = await fetch(url);
-+      return url;
-+    }
-+    async function getFile(file) {
-+      if (wasmFS$JSMemoryFiles[file]) {
-+        // The data is already here, so nothing to do before we continue on to
-+        // the actual read below.
-+        return Promise.resolve();
++      try {
++        var u = new URL(fileUrl, self.location.origin);
++        return u.toString();
++      } catch (_e) {
++        throw {status: 404};
 +      }
-+      // This is the first time we want the file's data.
-+      var response = await fetch(getUrl(file));
-       if (response.ok) {
-         var buffer = await response['arrayBuffer']();
-         wasmFS$JSMemoryFiles[file] = new Uint8Array(buffer);
-@@ -79,7 +84,24 @@
-         }
-         return jsFileOps.read(file, buffer, length, offset);
++    }
++    async function getFileRange(file, offset, len) {
++      var url = getFileUrl(file);
+       var chunkSize = __wasmfs_fetch_get_chunk_size(file);
+       offset ??= 0;
+       len ??= chunkSize;
+@@ -114,6 +118,7 @@ addToLibrary({
+       freeFile: async (file) => {
+         // free memory
+         wasmFS$JSMemoryRanges[file] = undefined;
++        delete wasmFS$fetchSizes[file];
        },
-+      // getSize answers from a HEAD request when it can, so a stat() does not
-+      // download (and retain) the whole file; a read still fetches it.
+ 
+       write: async (file, buffer, length, offset) => {
+@@ -156,6 +161,28 @@ addToLibrary({
+         return readLength;
+       },
        getSize: async (file) => {
-+        if (!wasmFS$JSMemoryFiles[file]) {
++        // Until the file's data is wanted, answer from a HEAD's Content-Length: getFileRange downloads (and
++        // keeps) the WHOLE file when the server offers no byte ranges or the file is under two chunks, which
++        // would make every stat() of such a file a full download. (FNA-WASM-Build emsdk.6.)
++        if (!wasmFS$JSMemoryRanges[file]) {
 +          var known = wasmFS$fetchSizes[file];
-+          if (known !== undefined) return known;
++          if (known !== undefined) {
++            return known;
++          }
 +          try {
-+            var head = await fetch(getUrl(file), { method: 'HEAD' });
++            var head = await fetch(getFileUrl(file), {method: 'HEAD'});
 +            var len = head.headers.get('Content-Length');
 +            if (head.ok && len !== null && !head.headers.get('Content-Encoding')) {
 +              var n = Number(len);
@@ -72,8 +91,10 @@ still fetches the file. Anything else falls back to the old full fetch.
 +                return n;
 +              }
 +            }
-+          } catch (e) {}
++          } catch (e) {
++            // fall through to the fetching path, which reports the failure
++          }
 +        }
          try {
-           await getFile(file);
-         } catch (response) {}
+           await getFileRange(file, 0, 0);
+         } catch (failedResponse) {

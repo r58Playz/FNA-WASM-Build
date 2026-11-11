@@ -4,6 +4,10 @@ read from JS through wasmfs_opfs_stat(kind, field) / wasmfs_opfs_stat_shape(what
 (-Wl,--export-if-defined) and its harness prints them as OPFS_BLOCKED. This was applied to the frozen emsdk
 on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh reproduces it.
 
+Ported to emscripten 6.0.2 (fna-6.0.2 7144d72); paths are emscripten 6's src/lib/lib*.js.
+
+diff --git a/system/lib/wasmfs/backends/opfs_backend.cpp b/system/lib/wasmfs/backends/opfs_backend.cpp
+index 6026fca..e5c1d59 100644
 --- a/system/lib/wasmfs/backends/opfs_backend.cpp
 +++ b/system/lib/wasmfs/backends/opfs_backend.cpp
 @@ -3,10 +3,12 @@
@@ -19,7 +23,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
  #include <vector>
  
  #include "backend.h"
-@@ -44,6 +46,72 @@
+@@ -44,6 +46,72 @@ public:
  #endif
  };
  
@@ -92,7 +96,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
  class OpenState {
  public:
    enum Kind { None, Access, Blob };
-@@ -57,6 +125,7 @@
+@@ -57,6 +125,7 @@ public:
    Kind getKind() { return kind; }
  
    int open(Worker& proxy, int fileID, oflags_t flags) {
@@ -100,7 +104,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      if (kind == None) {
        assert(openCount == 0);
        switch (flags) {
-@@ -118,6 +187,7 @@
+@@ -111,6 +180,7 @@ public:
    }
  
    int close(Worker& proxy) {
@@ -108,7 +112,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      // TODO: Downgrade to Blob access once the last writable file descriptor has
      // been closed.
      int err = 0;
-@@ -190,6 +260,7 @@
+@@ -184,6 +254,7 @@ public:
  
    ~OPFSFile() override {
      assert(state.getKind() == OpenState::None);
@@ -116,7 +120,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      proxy([&]() { _wasmfs_opfs_free_file(fileID); });
    }
  
-@@ -203,6 +274,7 @@
+@@ -197,6 +268,7 @@ private:
  
    // The uncached read, shared by read() and the cache fill.
    ssize_t readDirect(uint8_t* buf, size_t len, off_t offset) {
@@ -124,7 +128,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      // TODO: use an i64 here.
      int32_t nread;
      switch (state.getKind()) {
-@@ -231,6 +303,9 @@
+@@ -225,6 +297,9 @@ private:
      if (cachedSize >= 0) {
        return cachedSize;
      }
@@ -134,7 +138,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      off_t size;
      switch (state.getKind()) {
        case OpenState::None:
-@@ -257,6 +332,7 @@
+@@ -251,6 +326,7 @@ private:
    }
  
    int setSize(off_t size) override {
@@ -142,7 +146,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      dropCache();
      int err = 0;
      switch (state.getKind()) {
-@@ -310,6 +386,7 @@
+@@ -304,6 +380,7 @@ private:
  
    ssize_t write(const uint8_t* buf, size_t len, off_t offset) override {
      assert(state.getKind() == OpenState::Access);
@@ -150,7 +154,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      // Drop before the write, not after: the write can fail partway and leave the file changed regardless, and a
      // cache that survives a failed write is the worst of both.
      dropCache();
-@@ -323,6 +400,7 @@
+@@ -317,6 +394,7 @@ private:
    }
  
    int flush() override {
@@ -158,7 +162,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int err = 0;
      switch (state.getKind()) {
        case OpenState::Access:
-@@ -350,6 +428,7 @@
+@@ -344,6 +422,7 @@ public:
      : Directory(mode, backend), proxy(proxy), dirID(dirID) {}
  
    ~OPFSDirectory() override {
@@ -166,7 +170,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      // Never free the root directory ID.
      if (dirID != 0) {
        proxy([&]() { _wasmfs_opfs_free_directory(dirID); });
-@@ -358,6 +437,7 @@
+@@ -352,6 +431,7 @@ public:
  
  private:
    std::shared_ptr<File> getChild(const std::string& name) override {
@@ -174,7 +178,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int childType = 0, childID = 0;
      proxy([&](auto ctx) {
        _wasmfs_opfs_get_child(
-@@ -379,6 +459,7 @@
+@@ -373,6 +453,7 @@ private:
  
    std::shared_ptr<DataFile> insertDataFile(const std::string& name,
                                             mode_t mode) override {
@@ -182,7 +186,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int childID = 0;
      proxy([&](auto ctx) {
        _wasmfs_opfs_insert_file(ctx.ctx, dirID, name.c_str(), &childID);
-@@ -392,6 +473,7 @@
+@@ -386,6 +467,7 @@ private:
  
    std::shared_ptr<Directory> insertDirectory(const std::string& name,
                                               mode_t mode) override {
@@ -190,7 +194,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int childID = 0;
      proxy([&](auto ctx) {
        _wasmfs_opfs_insert_directory(ctx.ctx, dirID, name.c_str(), &childID);
-@@ -411,6 +493,7 @@
+@@ -405,6 +487,7 @@ private:
    }
  
    int insertMove(const std::string& name, std::shared_ptr<File> file) override {
@@ -198,7 +202,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int err = 0;
      if (file->is<DataFile>()) {
        auto opfsFile = std::static_pointer_cast<OPFSFile>(file);
-@@ -428,6 +511,7 @@
+@@ -422,6 +505,7 @@ private:
    }
  
    int removeChild(const std::string& name) override {
@@ -206,7 +210,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      int err = 0;
      proxy([&](auto ctx) {
        _wasmfs_opfs_remove_child(ctx.ctx, dirID, name.c_str(), &err);
-@@ -444,6 +528,7 @@
+@@ -438,6 +522,7 @@ private:
    }
  
    Directory::MaybeEntries getEntries() override {
@@ -214,7 +218,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      std::vector<Directory::Entry> entries;
      int err = 0;
      proxy([&](auto ctx) {
-@@ -469,6 +554,7 @@
+@@ -463,6 +548,7 @@ public:
    }
  
    std::shared_ptr<Directory> createDirectory(mode_t mode) override {
@@ -222,7 +226,7 @@ on 2026-09-07 without a patch here; recorded 2026-10-15 so freeze-emsdk.sh repro
      proxy([](auto ctx) { _wasmfs_opfs_init_root_directory(ctx.ctx); });
      return std::make_shared<OPFSDirectory>(mode, this, 1, proxy);
    }
-@@ -483,6 +569,49 @@
+@@ -477,6 +563,49 @@ public:
  
  extern "C" {
  

@@ -10,9 +10,8 @@ This repo is for automating the build of WebAssembly (WASM) native libraries for
 * [FNA3D.a](https://github.com/FNA-XNA/FNA3D) - 3D graphics library for FNA.
 * [FAudio.a](https://github.com/FNA-XNA/FAudio) - XAudio reimplementation for FNA.
 * [openssl](https://github.com/openssl/openssl) - OpenSSL WASM.
-* [libgdiplus.a](https://github.com/mono/libgdiplus) / System.Drawing - Mono GDI+ / System.Drawing for WASM.
 * `liba` + `hot_reload_detour` - Library used for MonoMod on WASM.
-* [dotnet](https://github.com/dotnet/runtime) - Patched dotnet wasm multithreaded runtime for MonoMod on WASM.
+* [dotnet](https://github.com/dotnet/runtime) - Patched dotnet wasm multithreaded runtime for MonoMod on WASM. Also includes custom WASM JIT
 
 There is currently just one workflow:
 1.  **WASM Build (FNA)**.  
@@ -23,7 +22,6 @@ This fork contains a few patches (and uses SDL3 as the base):
 - `SDL2.patch` (for sdl2-compat) and `SDL3-SDL2.patch` (for sdl3) to build a cursed static build of sdl2-compat
 - `FNA3D.patch` adds `-pthread` to the `CFLAGS` so FNA3D is built with WASM threads support.
 - `dotnet.patch` patches the dotnet runtime so MonoMod can be used.
-- `glib.patch` disables gio, fuzzing, tools, and docs subdirectories in glib to allow building for WASM without unsupported dependencies.
 
 It also builds dotnet for macOS, combining macos built mono aot cross with linux built dlls.
 
@@ -35,8 +33,11 @@ Go to the Actions tab and download the .zip artifact from the latest workflow ru
 ## Frozen emsdk artifact
 
 The workflow also produces `emsdk.zip` on Linux and `emsdk-osx-arm64.zip` on macOS. Each archive is a frozen copy of
-`src/mono/browser/emsdk` from the patched runtime build, including dotnet-style `emsdk_env` and `.emscripten`
-configuration. It is intended for consumers that need emsdk behavior to match dotnet runtime packaging.
+the emsdk the patched runtime provisions (`./build.sh -os browser -s provision.emsdk`), including dotnet-style
+`emsdk_env` and `.emscripten` configuration. In .NET 11 that emsdk lives in the runtime's wasm tool cache
+(`<main checkout>/.dotnet/wasm-tools/emscripten/<version>-<host rid>`, or under `DOTNET_WASM_TOOL_CACHE_DIR`); .NET 10
+kept it in `src/mono/browser/emsdk`. It is intended for consumers that need emsdk behavior to match dotnet runtime
+packaging.
 
 For local generation after building runtime in `liba/runtime`:
 

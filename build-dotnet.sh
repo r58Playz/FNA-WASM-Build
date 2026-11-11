@@ -5,7 +5,6 @@ usage() {
   echo "usage: $0 <runtime-root> <pthread:true|false> [output-zip]" >&2
   echo "example: $0 ./liba/runtime true ./liba/runtime.zip" >&2
   echo "example: $0 ../dotnet-runtime false ./ST-dotnet.zip" >&2
-  echo "env: WASM_ENABLE_JSPI=true to pass /p:WasmEnableJSPI=true to the runtime build" >&2
   exit 1
 }
 
@@ -16,7 +15,6 @@ fi
 RUNTIME_ROOT="$1"
 PTHREAD_FLAG="$2"
 OUTPUT_ZIP="${3:-$PWD/dotnet.zip}"
-WASM_ENABLE_JSPI="${WASM_ENABLE_JSPI:-false}"
 
 case "$PTHREAD_FLAG" in
   true|false) ;;
@@ -26,13 +24,10 @@ case "$PTHREAD_FLAG" in
     ;;
 esac
 
-case "$WASM_ENABLE_JSPI" in
-  true|false) ;;
-  *)
-    echo "error: WASM_ENABLE_JSPI must be 'true' or 'false', got: $WASM_ENABLE_JSPI" >&2
-    exit 1
-    ;;
-esac
+if [[ -n "${WASM_ENABLE_JSPI:-}" ]]; then
+  # The wasm-jit-11.0.0 runtime has no JSPI mode (the fork's JSPI commit was dropped in the move to .NET 11).
+  echo "warn: WASM_ENABLE_JSPI is ignored; the runtime no longer has a JSPI build" >&2
+fi
 
 if [[ ! -d "$RUNTIME_ROOT" ]]; then
   echo "error: runtime root does not exist: $RUNTIME_ROOT" >&2
@@ -47,8 +42,8 @@ RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_ZIP")" && pwd)"
 OUTPUT_ZIP="$OUTPUT_DIR/$(basename "$OUTPUT_ZIP")"
 
-echo "Building dotnet runtime (pthread=$PTHREAD_FLAG, jspi=$WASM_ENABLE_JSPI) in $RUNTIME_ROOT"
-(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:RunAOTCompilation=true /p:WasmEnableThreads="$PTHREAD_FLAG" /p:WasmEnableJSPI="$WASM_ENABLE_JSPI" -c Release -nodeReuse:false)
+echo "Building dotnet runtime (pthread=$PTHREAD_FLAG) in $RUNTIME_ROOT"
+(cd "$RUNTIME_ROOT" && ./build.sh -os browser -s mono+libs /p:RunAOTCompilation=true /p:WasmEnableThreads="$PTHREAD_FLAG" -c Release -nodeReuse:false)
 
 # Build the patched WasmAppBuilder so the bundle ships our modified
 # PInvokeTableGenerator + mono_wasm_marshal_get_managed_wrapper signature.
@@ -69,8 +64,21 @@ if [[ ! -x "$CROSS_OUT/mono-aot-cross" ]]; then
   echo "error: mono-aot-cross not built at: $CROSS_OUT/mono-aot-cross" >&2
   exit 1
 fi
-if [[ ! -f "$TASKS_OUT/net10.0/WasmAppBuilder.dll" ]]; then
-  echo "error: WasmAppBuilder.dll not built at: $TASKS_OUT/net10.0/" >&2
+# .NET 10 writes TFM folders (net10.0/net472); .NET 11 uses net/netframework.
+# Keep the checkout's layout and require a .NET task, even if only the
+# optional .NET Framework task was built.
+TASK_TFMS=()
+HAS_NET_TASKS=false
+for task_dir in "$TASKS_OUT"/net "$TASKS_OUT"/netframework "$TASKS_OUT"/net[0-9]*; do
+  [[ -f "$task_dir/WasmAppBuilder.dll" ]] || continue
+  tfm="${task_dir##*/}"
+  TASK_TFMS+=("$tfm")
+  case "$tfm" in
+    net|net[0-9]*.[0-9]*) HAS_NET_TASKS=true ;;
+  esac
+done
+if [[ "$HAS_NET_TASKS" != true ]]; then
+  echo "error: WasmAppBuilder.dll not built under: $TASKS_OUT (expected net/ or net<version>/)" >&2
   exit 1
 fi
 
@@ -89,29 +97,24 @@ done
 
 # Bundle the patched task assemblies. The SDK targets resolve the task DLL via
 # the WasmAppBuilderTasksAssemblyPath MSBuild property, which the consumer can
-# override to point at $(MicrosoftNetCoreAppRuntimePackDir)/tasks/net10.0/WasmAppBuilder.dll
+# override to point at $(MicrosoftNetCoreAppRuntimePackDir)/tasks/<tfm>/WasmAppBuilder.dll
 # from a Directory.Build.targets (imported after Sdk.targets, so the override wins).
-mkdir -p "$STAGE_DIR/tasks/net10.0" "$STAGE_DIR/tasks/net472"
-for tfm in net10.0 net472; do
-  if [[ ! -f "$TASKS_OUT/$tfm/WasmAppBuilder.dll" ]]; then
-    echo "warn: $TASKS_OUT/$tfm/WasmAppBuilder.dll missing, skipping" >&2
-    continue
-  fi
+for tfm in "${TASK_TFMS[@]}"; do
+  mkdir -p "$STAGE_DIR/tasks/$tfm"
   # Preserve the task's full dependency closure, including net472 companions.
   cp -a "$TASKS_OUT/$tfm/." "$STAGE_DIR/tasks/$tfm/"
 done
 
-python3 - "$RUNTIME_ROOT" "$PTHREAD_FLAG" "$WASM_ENABLE_JSPI" "$STAGE_DIR/runtime-build.json" <<'PY'
+python3 - "$RUNTIME_ROOT" "$PTHREAD_FLAG" "$STAGE_DIR/runtime-build.json" <<'PY'
 import json
 from pathlib import Path
 import subprocess
 import sys
 
-root, threads, jspi, destination = sys.argv[1:]
+root, threads, destination = sys.argv[1:]
 manifest = {
     "runtime_sha": subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip(),
     "wasm_enable_threads": threads == "true",
-    "wasm_enable_jspi": jspi == "true",
 }
 Path(destination).write_text(json.dumps(manifest, indent=2) + "\n")
 PY

@@ -50,7 +50,7 @@ class MacOSArtifacts(unittest.TestCase):
     def test_variants_preserve_payload_and_replace_all_cross_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for index, (name, variant, threads, jspi) in enumerate(assembler.VARIANTS):
+            for index, (name, variant, threads) in enumerate(assembler.VARIANTS):
                 with self.subTest(variant=name):
                     compiler = root / variant / "cross"
                     compiler.mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ class MacOSArtifacts(unittest.TestCase):
                     if not (compiler / "libtest.dylib").exists():
                         (compiler / "libtest.dylib").symlink_to("libtest.1.dylib")
                     runtime = {"runtime_sha": manifest["runtime_sha"],
-                               "wasm_enable_threads": threads, "wasm_enable_jspi": jspi}
+                               "wasm_enable_threads": threads}
                     payload = {"runtime-build.json": json.dumps(runtime).encode(),
                                "runtimes/browser-wasm/native/dotnet.native.wasm": bytes([index]),
                                "tasks/net10.0/WasmAppBuilder.dll": b"patched-task",
@@ -78,7 +78,7 @@ class MacOSArtifacts(unittest.TestCase):
                         archive.writestr("cross/mono-aot-cross", b"linux-elf")
                         archive.writestr("cross/nested/libold.so", b"linux-dependency")
                     destination = root / "output" / name
-                    assembler.assemble(source, compiler, destination, threads, jspi)
+                    assembler.assemble(source, compiler, destination, threads)
                     with zipfile.ZipFile(destination) as archive:
                         for path, data in payload.items():
                             self.assertEqual(archive.read(path), data)
@@ -91,7 +91,7 @@ class MacOSArtifacts(unittest.TestCase):
                     with zipfile.ZipFile(source, "w") as archive:
                         archive.writestr("runtime-build.json", json.dumps(runtime))
                     with self.assertRaisesRegex(ValueError, "runtime_sha"):
-                        assembler.assemble(source, compiler, destination, threads, jspi)
+                        assembler.assemble(source, compiler, destination, threads)
 
 
 if __name__ == "__main__":
