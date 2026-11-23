@@ -1,0 +1,109 @@
+WasmFS rename lock order: __syscall_renameat could deadlock against any path lookup. Everywhere else a directory is
+locked before its child (Directory::Handle::getChild holds the parent while cacheChild locks the child it caches;
+unlink/rmdir hold the parent while locking what they remove), but rename, holding both parents, walked newParent's
+ancestors with curr->locked() (child, then parent), and locked oldParent before newParent even when newParent was its
+ancestor. Seen in ikvmcraft (dotnet-runtime-jit findings R533): Minecraft's server thread renaming in its world
+directory held "New World" and waited for "saves", while an IO thread held "saves" and waited for "New World"; the game
+hung with every thread asleep. Now both parents' ancestor chains are collected before either is locked (one directory
+lock at a time; renameMutex keeps them valid, since only a rename reparents a directory), the parent that is the other's
+ancestor is locked first, and the ancestor test reads the collected chain. Adds a marker string so a deploy can prove the
+patched library is linked.
+
+--- a/system/lib/wasmfs/syscalls.cpp
++++ b/system/lib/wasmfs/syscalls.cpp
+@@ -28,6 +28,8 @@
+ #include <unistd.h>
+ #include <utility>
+ #include <vector>
++#include <algorithm>
++#include <optional>
+ #include <wasi/api.h>
+ 
+ #include "backend.h"
+@@ -38,6 +40,11 @@
+ #include "socket_file.h"
+ #include "special_files.h"
+ #include "stream_file.h"
++
++// FNA-WASM-Build emsdk.13.patch, kept in the binary so a deploy can prove it is
++// served (the fix itself adds no string).
++__attribute__((used)) static const char wasmfs_rename_order_marker[] =
++  "emsdk13-wasmfs-rename-lockorder";
+ #include "wasmfs.h"
+ 
+ // File permission macros for wasmfs.
+@@ -1044,8 +1051,8 @@
+                        const char* oldpath,
+                        int newdirfd,
+                        const char* newpath) {
+-  // Rename is the only syscall that needs to (or is allowed to) acquire locks
+-  // on two directories at once. It requires locks on both the old and new
++  // Rename is the only syscall that holds two directory locks that are not
++  // parent and child (see the lock order below). It requires locks on both the old and new
+   // parent directories to ensure that the moved file can be atomically removed
+   // from the old directory and added to the new directory without something
+   // changing that would prevent the move.
+@@ -1075,7 +1082,42 @@
+     return -ENAMETOOLONG;
+   }
+ 
+-  // Lock both directories.
++  auto root = wasmFS.getRootDirectory();
++
++  // Lock order. Everywhere else a directory is locked before its child:
++  // Directory::Handle::getChild holds the parent while cacheChild locks the
++  // child it caches, and unlink/rmdir hold the parent while locking the
++  // directory they remove. Walking newParent's ancestors while holding both
++  // parents, or locking oldParent before a newParent that is its ancestor,
++  // takes the reverse order and deadlocks against such a lookup (a game's
++  // save-time replace-by-rename in its world directory against another
++  // thread's path walk through that directory's parent). So collect both
++  // ancestor chains first, holding one directory lock at a time, and lock
++  // whichever parent is the other's ancestor first. renameMutex keeps the
++  // chains valid: only a rename gives a directory a different parent;
++  // unlink/rmdir clear it, and a cleared parent ends the walk.
++  auto ancestors = [&](std::shared_ptr<Directory> dir) {
++    std::vector<std::shared_ptr<Directory>> chain;
++    for (auto curr = dir; curr && curr != root;
++         curr = curr->locked().getParent()) {
++      chain.push_back(curr);
++    }
++    return chain;
++  };
++  auto newAncestors = ancestors(newParent);
++  auto oldAncestors = ancestors(oldParent);
++  // The root is in no chain and is every directory's ancestor.
++  bool newParentFirst =
++    newParent != oldParent &&
++    (newParent == root ||
++     std::find(oldAncestors.begin(), oldAncestors.end(), newParent) !=
++       oldAncestors.end());
++  std::optional<Directory::Handle> ancestorFirst;
++  if (newParentFirst) {
++    ancestorFirst.emplace(newParent->locked());
++  }
++
++  // Lock both directories (recursive: newParent may already be held above).
+   auto lockedOldParent = oldParent->locked();
+   auto lockedNewParent = newParent->locked();
+ 
+@@ -1093,7 +1135,6 @@
+   }
+ 
+   // Never allow renaming or overwriting the root.
+-  auto root = wasmFS.getRootDirectory();
+   if (oldFile == root || newFile == root) {
+     return -EBUSY;
+   }
+@@ -1109,8 +1150,9 @@
+     return -EXDEV;
+   }
+ 
+-  // Check that oldDir is not an ancestor of newDir.
+-  for (auto curr = newParent; curr != root; curr = curr->locked().getParent()) {
++  // Check that oldDir is not an ancestor of newDir (the chain collected
++  // above, before any directory was held; it starts at newParent).
++  for (auto& curr : newAncestors) {
+     if (curr == oldFile) {
+       return -EINVAL;
+     }

@@ -118,6 +118,7 @@ apply_patch "${SCRIPT_DIR}/emsdk.9.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.10.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.11.patch"
 apply_patch "${SCRIPT_DIR}/emsdk.12.patch"
+apply_patch "${SCRIPT_DIR}/emsdk.13.patch"
 
 # Rebuild after patching so the archives contain patched code as well as patched sources. The list is every archive
 # and crt object the provisioned cache already holds, read BEFORE embuilder runs: the cache's sanity.txt names the
